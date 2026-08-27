@@ -81,7 +81,7 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
       model: model,
       messages,
       temperature: 0.7,
-      max_tokens: 1024,
+      max_completion_tokens: 1024,
       stream: true,
     });
 

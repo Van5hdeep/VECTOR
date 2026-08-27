@@ -100,8 +100,10 @@ function App() {
   }, []);
 
   const handleOpenCalendar = useCallback(() => {
+    // Suppress the click if the user was dragging the calendar card
+    if (calendarDrag.hasMoved()) return;
     setIsCalendarOpen(true);
-  }, []);
+  }, [calendarDrag]);
 
   const handleCloseCalendar = useCallback(() => {
     setIsCalendarOpen(false);

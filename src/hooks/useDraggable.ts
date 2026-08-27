@@ -85,7 +85,8 @@ export function useDraggable(initialPosition: Position = { x: 0, y: 0 }) {
   return {
     position,
     isDragging,
-    hasMoved: hasMoved.current,
+    /** Returns true if the pointer moved past the drag threshold during the current/last interaction */
+    hasMoved: () => hasMoved.current,
     dragProps: {
       onPointerDown: handlePointerDown,
       style: {
