@@ -1,22 +1,19 @@
-import type { ChatMessage } from "../types/vector";
-
-export interface TelemetryData {
-  sessionTokensUsed: number;
-  contextTokensUsed: number;
-  contextLimit: number;
-}
+import type { ChatMessage, TelemetryData } from "../types/vector";
+import type { VectorContextState } from "../types/context";
 
 export async function sendMessage(
   message: string,
   history: ChatMessage[],
+  isVoice: boolean,
   onChunk: (text: string) => void,
-  onTelemetry?: (data: TelemetryData) => void
+  onTelemetry?: (data: TelemetryData) => void,
+  vectorContext?: VectorContextState
 ): Promise<void> {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, history }),
+      body: JSON.stringify({ message, history, isVoice, clientContext: vectorContext }),
     });
 
     if (!res.ok) {

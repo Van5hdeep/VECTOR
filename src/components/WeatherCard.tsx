@@ -1,8 +1,5 @@
-import type { WeatherData } from "../types/vector";
-
-interface WeatherCardProps {
-  data: WeatherData;
-}
+import { useState } from "react";
+import { useVectorContext } from "../context/VectorContext";
 
 const WeatherIcon = () => (
   <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -22,12 +19,31 @@ const WeatherIcon = () => (
   </svg>
 );
 
-const WeatherCard = ({ data }: WeatherCardProps) => {
+const WeatherCard = () => {
+  const { weather, location } = useVectorContext();
+  const [showForecast, setShowForecast] = useState(false);
+
+  if (!weather.isAvailable) {
+    return (
+      <div className="card">
+        <div className="card__header">
+          <span className="card__title">WEATHER</span>
+        </div>
+        <div className="card__body" style={{ padding: '24px', opacity: 0.6, fontSize: '0.85rem' }}>
+          {weather.error ? `Error: ${weather.error}` : "Acquiring atmospheric data..."}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="card">
+    <div className="card" style={{ cursor: 'pointer' }} onClick={() => setShowForecast(p => !p)}>
       <div className="card__header">
         <span className="card__title">WEATHER</span>
-        <span className="card__icon">
+        <span className="card__icon" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          <span style={{ fontSize: '0.7rem', opacity: 0.5, letterSpacing: '1px' }}>
+            {showForecast ? "HIDE FORECAST" : "7-DAY FORECAST"}
+          </span>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4" />
             <circle cx="8" cy="8" r="2" fill="currentColor" opacity="0.3" />
@@ -40,18 +56,31 @@ const WeatherCard = ({ data }: WeatherCardProps) => {
             <WeatherIcon />
           </div>
           <div className="weather__info">
-            <div className="weather__location">{data.location}</div>
-            <div className="weather__temp">{data.temperature}°C</div>
-            <div className="weather__condition">{data.condition}</div>
+            <div className="weather__location">{location.city || "Local Area"}</div>
+            <div className="weather__temp">{weather.temperature}°C</div>
+            <div className="weather__condition">{weather.condition}</div>
           </div>
         </div>
         <div className="weather__details">
-          <span className="weather__detail-item">{data.high}° / {data.low}°</span>
+          <span className="weather__detail-item">{weather.high}° / {weather.low}°</span>
           <span className="weather__detail-separator">|</span>
-          <span className="weather__detail-item">Humidity {data.humidity}%</span>
+          <span className="weather__detail-item">Humidity {weather.humidity}%</span>
           <span className="weather__detail-separator">|</span>
-          <span className="weather__detail-item">Wind {data.wind} km/h</span>
+          <span className="weather__detail-item">Wind {weather.wind} km/h</span>
         </div>
+
+        {showForecast && weather.forecast && weather.forecast.length > 0 && (
+          <div className="weather__forecast" style={{ marginTop: '16px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '12px' }}>
+            {weather.forecast.map((day, idx) => (
+              <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', padding: '4px 0', opacity: 0.8 }}>
+                <span style={{ width: '40px' }}>{day.dayOfWeek}</span>
+                <span style={{ flex: 1, textAlign: 'left', opacity: 0.7 }}>{day.condition}</span>
+                <span style={{ color: 'rgba(255,255,255,0.5)' }}>{day.precipitationProbability}% precip</span>
+                <span style={{ width: '60px', textAlign: 'right' }}>{day.maxTemp}° / {day.minTemp}°</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -58,6 +58,12 @@ export interface ContextUsage {
   limit: number;
 }
 
+export interface TelemetryData {
+  sessionTokensUsed: number;
+  contextTokensUsed: number;
+  contextLimit: number;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;

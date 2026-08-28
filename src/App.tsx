@@ -1,8 +1,12 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import type { ChatMessage } from "./types/vector";
-import { weatherData } from "./data/mockData";
+import type { VectorStatus } from "./types/vector";
 import { sendMessage } from "./api/chat";
+import { transcribeAudio } from "./api/stt";
 import { useDraggable } from "./hooks/useDraggable";
+import { useVoice } from "./hooks/useVoice";
+
+import { VectorProvider } from "./context/VectorContext";
 
 import HudFrame from "./components/HudFrame";
 import VectorHeader from "./components/VectorHeader";
@@ -15,6 +19,8 @@ import CommandBar from "./components/CommandBar";
 import ConversationPanel from "./components/ConversationPanel";
 import CalendarWorkspace from "./components/CalendarWorkspace";
 
+import { useVectorContext } from "./context/VectorContext";
+
 const formatTokens = (value: number): string => {
   if (value >= 1000) {
     return (value / 1000).toFixed(1) + "K";
@@ -22,7 +28,7 @@ const formatTokens = (value: number): string => {
   return value.toString();
 };
 
-function App() {
+function AppContent() {
   // Conversation state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isConversationOpen, setIsConversationOpen] = useState(false);
@@ -49,17 +55,30 @@ function App() {
   const contextDrag = useDraggable();
   const chatUnitDrag = useDraggable();
 
-  const handleCommand = useCallback(async (query: string) => {
-    const trimmed = query.trim();
-    if (!trimmed || isLoading) return;
+  // Voice state
+  const voicePropsRef = useRef<{ onRecordingComplete?: (blob: Blob) => void }>({});
+  const voice = useVoice(voicePropsRef.current);
+  const interactionIdRef = useRef<number>(0);
+  const vectorContext = useVectorContext();
 
-    // Open the conversation panel if not already open
-    if (!isConversationOpen) {
-      setIsConversationOpen(true);
-    }
-    // Restore from minimized if needed
-    if (isConversationMinimized) {
-      setIsConversationMinimized(false);
+  const handleCommand = useCallback(async (query: string, isVoiceParam?: any) => {
+    const isVoice = isVoiceParam === true; // Strictly boolean
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    if (isLoading && !isVoice) return;
+
+    interactionIdRef.current += 1;
+    const currentInteractionId = interactionIdRef.current;
+
+    if (!isVoice) {
+      // Open the conversation panel if not already open
+      if (!isConversationOpen) {
+        setIsConversationOpen(true);
+      }
+      // Restore from minimized if needed
+      if (isConversationMinimized) {
+        setIsConversationMinimized(false);
+      }
     }
 
     // Add user message and an empty placeholder for the assistant response
@@ -71,23 +90,51 @@ function App() {
     let currentResponse = "";
 
     try {
-      await sendMessage(trimmed, messages, (chunk) => {
+      await sendMessage(trimmed, messages, isVoice, (chunk) => {
+        if (interactionIdRef.current !== currentInteractionId) return;
         currentResponse += chunk;
         setMessages((prev) => {
           const newMessages = [...prev];
-          // Update the last message (the assistant placeholder)
           newMessages[newMessages.length - 1] = { role: "assistant", content: currentResponse };
           return newMessages;
         });
       }, (telemetry) => {
+        if (interactionIdRef.current !== currentInteractionId) return;
         setSessionTokensUsed(telemetry.sessionTokensUsed);
         setContextTokensUsed(telemetry.contextTokensUsed);
         setContextLimit(telemetry.contextLimit);
-      });
+      }, vectorContext);
+
+      // If voice mode is active, send the completed response to ElevenLabs TTS
+      if (interactionIdRef.current === currentInteractionId && voice.voiceActive && currentResponse.trim()) {
+        voice.speak(currentResponse);
+      }
     } finally {
-      setIsLoading(false);
+      if (interactionIdRef.current === currentInteractionId) {
+        setIsLoading(false);
+      }
     }
-  }, [isLoading, isConversationOpen, isConversationMinimized, messages]);
+  }, [isLoading, isConversationOpen, isConversationMinimized, messages, voice.voiceActive, voice.speak, vectorContext]);
+
+  voicePropsRef.current.onRecordingComplete = async (audioBlob: Blob) => {
+    try {
+      const transcript = await transcribeAudio(audioBlob);
+      if (transcript.trim()) {
+        await handleCommand(transcript, true);
+      } else {
+        // If STT returned nothing (gibberish/noise), but voice is still active,
+        // we shouldn't kill the whole session. We just do nothing and let the user speak again or click to cancel.
+        if (!voice.voiceActive) {
+          voice.resetVoice();
+        }
+      }
+    } catch (err) {
+      console.error("[VECTOR] Voice pipeline error:", err);
+      if (!voice.voiceActive) {
+        voice.resetVoice();
+      }
+    }
+  };
 
   const handleMinimize = useCallback(() => {
     setIsConversationMinimized((prev) => !prev);
@@ -100,10 +147,8 @@ function App() {
   }, []);
 
   const handleOpenCalendar = useCallback(() => {
-    // Suppress the click if the user was dragging the calendar card
-    if (calendarDrag.hasMoved()) return;
     setIsCalendarOpen(true);
-  }, [calendarDrag]);
+  }, []);
 
   const handleCloseCalendar = useCallback(() => {
     setIsCalendarOpen(false);
@@ -123,6 +168,21 @@ function App() {
   const ctxPercentage = Math.round((contextTokensUsed / ctxLimitSafe) * 100);
   const ctxFillWidth = Math.min((contextTokensUsed / ctxLimitSafe) * 100, 100);
 
+  // Derive core status from voice state (internal only — not displayed as text)
+  const coreStatus: VectorStatus = voice.voiceActive
+    ? voice.isSpeaking
+      ? "speaking"
+      : voice.isProcessing
+        ? "processing"
+        : "listening"
+    : "standby";
+
+  // Handle core click: toggle voice mode
+  const handleCoreClick = useCallback(() => {
+    voice.toggleVoice();
+  }, [voice]);
+
+  // Session Context is now maintained in App wrapper
   return (
     <div className="app">
       <HudFrame />
@@ -163,14 +223,18 @@ function App() {
         <div className="main-layout">
           {/* Left panel */}
           <div className="side-panel">
-            <div {...weatherDrag.dragProps}><WeatherCard data={weatherData} /></div>
+            <div {...weatherDrag.dragProps}><WeatherCard /></div>
             <div {...timeDrag.dragProps}><TimeCard /></div>
             <div {...sessionDrag.dragProps}><SessionCard /></div>
           </div>
 
           {/* Central AI Core */}
           <div {...coreDrag.dragProps} style={{ ...coreDrag.dragProps.style, display: "flex", justifyContent: "center" }}>
-            <VectorCore status="standby" />
+            <VectorCore
+              status={coreStatus}
+              onCoreClick={handleCoreClick}
+              amplitude={voice.amplitude}
+            />
           </div>
 
           {/* Right panel */}
@@ -247,4 +311,10 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <VectorProvider>
+      <AppContent />
+    </VectorProvider>
+  );
+}

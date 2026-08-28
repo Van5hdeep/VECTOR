@@ -89,6 +89,12 @@ export function useDraggable(initialPosition: Position = { x: 0, y: 0 }) {
     hasMoved: () => hasMoved.current,
     dragProps: {
       onPointerDown: handlePointerDown,
+      onClickCapture: (e: React.MouseEvent) => {
+        if (hasMoved.current) {
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      },
       style: {
         transform: `translate(${position.x}px, ${position.y}px)`,
         cursor: isDragging ? "grabbing" : undefined,

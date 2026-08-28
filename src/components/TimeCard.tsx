@@ -1,12 +1,25 @@
 import { useState, useEffect } from "react";
+import { useVectorContext } from "../context/VectorContext";
 
 const TimeCard = () => {
+  const { updateTime } = useVectorContext();
   const [now, setNow] = useState(new Date());
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (updateTime) {
+      updateTime({
+        currentTime: formatTime(now),
+        currentDate: formatDate(now),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        dayOfWeek: now.toLocaleDateString("en-US", { weekday: "long" })
+      });
+    }
+  }, [now, updateTime]);
 
   const formatTime = (date: Date): string => {
     return date.toLocaleTimeString("en-US", {

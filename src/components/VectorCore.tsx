@@ -4,9 +4,11 @@ import type { VectorStatus } from "../types/vector";
 interface VectorCoreProps {
   status: VectorStatus;
   onCoreClick?: () => void;
+  /** Audio amplitude 0–1 for audio-reactive glow (driven by Web Audio API) */
+  amplitude?: number;
 }
 
-const VectorCore = ({ status, onCoreClick }: VectorCoreProps) => {
+const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => {
   const isActive = status === "listening" || status === "speaking";
 
   // Adjust animation speeds based on status
@@ -24,8 +26,10 @@ const VectorCore = ({ status, onCoreClick }: VectorCoreProps) => {
     }
   }, [status]);
 
-  const glowIntensity = isActive ? 0.45 : status === "standby" ? 0.15 : 0.25;
-  const coreGlowIntensity = isActive ? 0.7 : 0.3;
+  // Audio-reactive glow: amplitude boosts intensity when active
+  const ampBoost = isActive ? 1.0 + amplitude * 1.5 : 1.0;
+  const glowIntensity = (isActive ? 0.45 : status === "standby" ? 0.15 : 0.25) * ampBoost;
+  const coreGlowIntensity = (isActive ? 0.7 : 0.3) * ampBoost;
 
   // Generate tick marks for rings
   const outerTicks = Array.from({ length: 72 }, (_, i) => i * 5);
@@ -49,9 +53,24 @@ const VectorCore = ({ status, onCoreClick }: VectorCoreProps) => {
     });
   }, []);
 
+  // Audio-reactive ambient scale: subtle expansion when amplitude is high
+  const ambientScale = isActive ? 1.0 + amplitude * 0.15 : 1.0;
+  const ambientOpacity = isActive ? 0.6 + amplitude * 0.4 : undefined;
+
   return (
     <div className="core-container">
-      <div className="core__ambient" />
+      <div
+        className="core__ambient"
+        style={
+          isActive
+            ? {
+                transform: `translate(-50%, -50%) scale(${ambientScale})`,
+                opacity: ambientOpacity,
+                transition: "transform 0.08s ease-out, opacity 0.08s ease-out",
+              }
+            : undefined
+        }
+      />
       <div
         className={`core-wrapper ${isActive ? "core-wrapper--active" : ""}`}
         onClick={onCoreClick}

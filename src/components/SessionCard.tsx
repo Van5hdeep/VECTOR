@@ -1,15 +1,19 @@
 import { useState, useEffect, useRef } from "react";
+import { useVectorContext } from "../context/VectorContext";
 
 const SessionCard = () => {
+  const { updateSessionDuration } = useVectorContext();
   const sessionStart = useRef(new Date());
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - sessionStart.current.getTime()) / 1000));
+      const e = Math.floor((Date.now() - sessionStart.current.getTime()) / 1000);
+      setElapsed(e);
+      if (updateSessionDuration) updateSessionDuration(e);
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [updateSessionDuration]);
 
   const formatElapsed = (totalSeconds: number) => {
     const hours = Math.floor(totalSeconds / 3600);
