@@ -4,7 +4,8 @@ export type VectorStatus =
   | "thinking"
   | "processing"
   | "speaking"
-  | "private";
+  | "private"
+  | "locked";
 
 export interface WeatherData {
   location: string;
@@ -76,4 +77,5 @@ export const STATUS_LABELS: Record<VectorStatus, string> = {
   processing: "PROCESSING",
   speaking: "SPEAKING",
   private: "PRIVATE MODE",
+  locked: "SYSTEM LOCKED",
 };

@@ -1,8 +1,18 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import Groq, { toFile } from "groq-sdk";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
+import {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} from "@simplewebauthn/server";
+import type {
+  AuthenticatorTransportFuture,
+} from "@simplewebauthn/server";
 import { VECTOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import {
   getAuthStatus,
@@ -463,10 +473,196 @@ app.delete("/api/calendar/events/:eventId", async (req: express.Request, res: ex
   }
 });
 
+// ═══════════════════════════════════════════════════════════
+//  Authentication Routes (Lock Screen)
+// ═══════════════════════════════════════════════════════════
+
+// WebAuthn configuration
+const rpName = "VECTOR";
+const rpID = "localhost";
+const origin = "http://localhost:5173";
+
+// In-memory WebAuthn credential store (sufficient for dev; replace with DB later)
+interface StoredCredential {
+  credentialID: string;
+  credentialPublicKey: Uint8Array;
+  counter: number;
+  transports?: AuthenticatorTransportFuture[];
+}
+const webauthnCredentials: StoredCredential[] = [];
+let currentChallenge: string | undefined;
+
+/** Password authentication */
+app.post("/api/auth/password", (req: express.Request, res: express.Response) => {
+  try {
+    const { password } = req.body as { password?: string };
+    const lockPassword = process.env.VECTOR_LOCK_PASSWORD;
+
+    if (!lockPassword) {
+      res.status(500).json({ success: false, error: "Authentication not configured." });
+      return;
+    }
+
+    if (!password || typeof password !== "string") {
+      res.status(400).json({ success: false, error: "Authentication failed." });
+      return;
+    }
+
+    // Constant-time comparison to prevent timing attacks
+    const a = Buffer.from(password);
+    const b = Buffer.from(lockPassword);
+
+    let match = false;
+    if (a.length === b.length) {
+      match = crypto.timingSafeEqual(a, b);
+    }
+
+    if (match) {
+      res.json({ success: true });
+    } else {
+      res.json({ success: false, error: "Authentication failed." });
+    }
+  } catch {
+    res.status(500).json({ success: false, error: "Authentication failed." });
+  }
+});
+
+/** WebAuthn - Check if credentials are registered */
+app.get("/api/auth/webauthn/status", (_req: express.Request, res: express.Response) => {
+  res.json({ registered: webauthnCredentials.length > 0 });
+});
+
+/** WebAuthn - Generate registration options */
+app.post("/api/auth/webauthn/register/options", async (_req: express.Request, res: express.Response) => {
+  try {
+    const options = await generateRegistrationOptions({
+      rpName,
+      rpID,
+      userName: "vector-user",
+      attestationType: "none",
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        userVerification: "required",
+        residentKey: "preferred",
+      },
+      excludeCredentials: webauthnCredentials.map((cred) => ({
+        id: cred.credentialID,
+        type: "public-key" as const,
+        transports: cred.transports,
+      })),
+    });
+
+    currentChallenge = options.challenge;
+    res.json(options);
+  } catch (err) {
+    console.error("[VECTOR_CORE] WebAuthn registration options error:", (err as Error).message);
+    res.status(500).json({ error: "Failed to generate registration options." });
+  }
+});
+
+/** WebAuthn - Verify registration response */
+app.post("/api/auth/webauthn/register/verify", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!currentChallenge) {
+      res.status(400).json({ success: false, error: "No challenge found. Request options first." });
+      return;
+    }
+
+    const verification = await verifyRegistrationResponse({
+      response: req.body,
+      expectedChallenge: currentChallenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+    });
+
+    if (verification.verified && verification.registrationInfo) {
+      const { credential } = verification.registrationInfo;
+      webauthnCredentials.push({
+        credentialID: credential.id,
+        credentialPublicKey: credential.publicKey,
+        counter: credential.counter,
+        transports: req.body.response?.transports,
+      });
+      currentChallenge = undefined;
+      res.json({ success: true });
+    } else {
+      res.json({ success: false, error: "Registration verification failed." });
+    }
+  } catch (err) {
+    console.error("[VECTOR_CORE] WebAuthn registration verify error:", (err as Error).message);
+    res.status(500).json({ success: false, error: "Registration verification failed." });
+  }
+});
+
+/** WebAuthn - Generate authentication options */
+app.post("/api/auth/webauthn/authenticate/options", async (_req: express.Request, res: express.Response) => {
+  try {
+    const options = await generateAuthenticationOptions({
+      rpID,
+      allowCredentials: webauthnCredentials.map((cred) => ({
+        id: cred.credentialID,
+        type: "public-key" as const,
+        transports: cred.transports,
+      })),
+      userVerification: "required",
+    });
+
+    currentChallenge = options.challenge;
+    res.json(options);
+  } catch (err) {
+    console.error("[VECTOR_CORE] WebAuthn auth options error:", (err as Error).message);
+    res.status(500).json({ error: "Failed to generate authentication options." });
+  }
+});
+
+/** WebAuthn - Verify authentication response */
+app.post("/api/auth/webauthn/authenticate/verify", async (req: express.Request, res: express.Response) => {
+  try {
+    if (!currentChallenge) {
+      res.status(400).json({ success: false, error: "No challenge found." });
+      return;
+    }
+
+    const credential = webauthnCredentials.find(
+      (cred) => cred.credentialID === req.body.id
+    );
+
+    if (!credential) {
+      res.json({ success: false, error: "Authentication failed." });
+      return;
+    }
+
+    const verification = await verifyAuthenticationResponse({
+      response: req.body,
+      expectedChallenge: currentChallenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+      credential: {
+        id: credential.credentialID,
+        publicKey: credential.credentialPublicKey,
+        counter: credential.counter,
+        transports: credential.transports,
+      },
+    });
+
+    if (verification.verified) {
+      credential.counter = verification.authenticationInfo.newCounter;
+      currentChallenge = undefined;
+      res.json({ success: true });
+    } else {
+      res.json({ success: false, error: "Authentication failed." });
+    }
+  } catch (err) {
+    console.error("[VECTOR_CORE] WebAuthn auth verify error:", (err as Error).message);
+    res.status(500).json({ success: false, error: "Authentication failed." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`[VECTOR_CORE] Running on port ${PORT}`);
   console.log(`[VECTOR_CORE] Model: ${model}`);
   console.log(`[VECTOR_CORE] ElevenLabs TTS: ${elevenlabs ? "Enabled" : "Disabled"}`);
   const calStatus = getAuthStatus();
   console.log(`[VECTOR_CORE] Google Calendar: ${calStatus.connected ? "Connected" : "Not connected"}${!calStatus.credentialsFound ? " (credentials not found)" : ""}`);
+  console.log(`[VECTOR_CORE] Lock Screen: ${process.env.VECTOR_LOCK_PASSWORD ? "Enabled" : "Not configured"}`);
 });

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { ChatMessage } from "./types/vector";
 import type { VectorStatus } from "./types/vector";
 import { sendMessage } from "./api/chat";
@@ -18,6 +18,7 @@ import SessionCard from "./components/SessionCard";
 import CommandBar from "./components/CommandBar";
 import ConversationPanel from "./components/ConversationPanel";
 import CalendarWorkspace from "./components/CalendarWorkspace";
+import LockScreen from "./components/LockScreen";
 
 import { useVectorContext } from "./context/VectorContext";
 
@@ -29,6 +30,9 @@ const formatTokens = (value: number): string => {
 };
 
 function AppContent() {
+  // Lock state
+  const [lockState, setLockState] = useState<"locked" | "unlocking" | "unlocked">("locked");
+
   // Conversation state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isConversationOpen, setIsConversationOpen] = useState(false);
@@ -159,6 +163,40 @@ function AppContent() {
     setCalendarRefreshTrigger((prev) => prev + 1);
   }, []);
 
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input, textarea, or contentEditable
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        (e.target as HTMLElement).isContentEditable
+      ) {
+        return;
+      }
+
+      // Don't trigger when locked
+      if (lockState !== "unlocked") return;
+
+      if (e.key === "/") {
+        e.preventDefault();
+        setIsConversationOpen(true);
+        setIsConversationMinimized(false);
+        
+        // Focus the input, using requestAnimationFrame to ensure it happens after state update
+        requestAnimationFrame(() => {
+          const input = document.querySelector('.command-bar__input') as HTMLInputElement;
+          if (input) {
+            input.focus();
+          }
+        });
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [lockState]);
+
   // Compute metrics for compact indicators
   const sessionTokenTarget = 100000;
   const llmPercentage = ((sessionTokensUsed / sessionTokenTarget) * 100).toFixed(1);
@@ -183,8 +221,21 @@ function AppContent() {
   }, [voice]);
 
   // Session Context is now maintained in App wrapper
+  // Lock screen wrapper
+  const handleUnlockStart = useCallback(() => {
+    setLockState("unlocking");
+    setTimeout(() => {
+      setLockState("unlocked");
+    }, 1500); // 1.5s for transition
+  }, []);
+
   return (
-    <div className="app">
+    <div className={`app ${lockState !== "unlocked" ? "app--locked" : "app--unlocked"}`}>
+      <div className="app__bg" />
+      {lockState !== "unlocked" && (
+        <LockScreen onUnlock={handleUnlockStart} isUnlocking={lockState === "unlocking"} />
+      )}
+      
       <HudFrame />
 
       {/* Title bar */}
@@ -229,9 +280,9 @@ function AppContent() {
           </div>
 
           {/* Central AI Core */}
-          <div {...coreDrag.dragProps} style={{ ...coreDrag.dragProps.style, display: "flex", justifyContent: "center" }}>
+          <div {...coreDrag.dragProps} style={{ ...coreDrag.dragProps.style, display: "flex", justifyContent: "center", position: "relative", zIndex: 5 }}>
             <VectorCore
-              status={coreStatus}
+              status={lockState === "locked" ? "locked" : coreStatus}
               onCoreClick={handleCoreClick}
               amplitude={voice.amplitude}
             />

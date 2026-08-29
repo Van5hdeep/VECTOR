@@ -10,10 +10,30 @@ interface VectorCoreProps {
 
 const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => {
   const isActive = status === "listening" || status === "speaking";
+  const isLocked = status === "locked";
+
+  // Color scheme: red when locked, cyan otherwise
+  const colors = isLocked
+    ? {
+        primary: "#FF3333",
+        secondary: "#FF4444",
+        bright: "#FF6B6B",
+        dim: "#8A1A1A",
+        white: "#FFAAAA",
+      }
+    : {
+        primary: "#00C8FF",
+        secondary: "#18BFFF",
+        bright: "#5BE7FF",
+        dim: "#0A6E8A",
+        white: "#FFFFFF",
+      };
 
   // Adjust animation speeds based on status
   const speeds = useMemo(() => {
     switch (status) {
+      case "locked":
+        return { outer: 80, mid: 45, inner: 35, pulse: 4 };
       case "listening":
         return { outer: 50, mid: 25, inner: 18, pulse: 2 };
       case "thinking":
@@ -28,8 +48,8 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
 
   // Audio-reactive glow: amplitude boosts intensity when active
   const ampBoost = isActive ? 1.0 + amplitude * 1.5 : 1.0;
-  const glowIntensity = (isActive ? 0.45 : status === "standby" ? 0.15 : 0.25) * ampBoost;
-  const coreGlowIntensity = (isActive ? 0.7 : 0.3) * ampBoost;
+  const glowIntensity = (isLocked ? 0.2 : isActive ? 0.45 : status === "standby" ? 0.15 : 0.25) * ampBoost;
+  const coreGlowIntensity = (isLocked ? 0.4 : isActive ? 0.7 : 0.3) * ampBoost;
 
   // Generate tick marks for rings
   const outerTicks = Array.from({ length: 72 }, (_, i) => i * 5);
@@ -108,30 +128,30 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
 
             {/* Radial gradient for center */}
             <radialGradient id="centerGlow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#00C8FF" stopOpacity={glowIntensity} />
-              <stop offset="100%" stopColor="#00C8FF" stopOpacity="0" />
+              <stop offset="0%" stopColor={colors.primary} stopOpacity={glowIntensity} />
+              <stop offset="100%" stopColor={colors.primary} stopOpacity="0" />
             </radialGradient>
 
             {/* Energy core gradient */}
             <radialGradient id="energyCoreGlow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#FFFFFF" stopOpacity={coreGlowIntensity} />
-              <stop offset="25%" stopColor="#5BE7FF" stopOpacity={coreGlowIntensity * 0.8} />
-              <stop offset="60%" stopColor="#00C8FF" stopOpacity={coreGlowIntensity * 0.4} />
-              <stop offset="100%" stopColor="#00C8FF" stopOpacity="0" />
+              <stop offset="0%" stopColor={colors.white} stopOpacity={coreGlowIntensity} />
+              <stop offset="25%" stopColor={colors.bright} stopOpacity={coreGlowIntensity * 0.8} />
+              <stop offset="60%" stopColor={colors.primary} stopOpacity={coreGlowIntensity * 0.4} />
+              <stop offset="100%" stopColor={colors.primary} stopOpacity="0" />
             </radialGradient>
 
             {/* Ring gradient */}
             <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#00C8FF" stopOpacity={isActive ? "0.9" : "0.6"} />
-              <stop offset="50%" stopColor="#18BFFF" stopOpacity={isActive ? "0.5" : "0.3"} />
-              <stop offset="100%" stopColor="#5BE7FF" stopOpacity={isActive ? "0.9" : "0.6"} />
+              <stop offset="0%" stopColor={colors.primary} stopOpacity={isActive ? "0.9" : "0.6"} />
+              <stop offset="50%" stopColor={colors.secondary} stopOpacity={isActive ? "0.5" : "0.3"} />
+              <stop offset="100%" stopColor={colors.bright} stopOpacity={isActive ? "0.9" : "0.6"} />
             </linearGradient>
 
             {/* Scan line gradient */}
             <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stopColor="#00C8FF" stopOpacity="0" />
-              <stop offset="50%" stopColor="#00C8FF" stopOpacity="0.4" />
-              <stop offset="100%" stopColor="#00C8FF" stopOpacity="0" />
+              <stop offset="0%" stopColor={colors.primary} stopOpacity="0" />
+              <stop offset="50%" stopColor={colors.primary} stopOpacity="0.4" />
+              <stop offset="100%" stopColor={colors.primary} stopOpacity="0" />
             </linearGradient>
           </defs>
 
@@ -154,7 +174,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="170"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth={isActive ? "0.8" : "0.5"}
               opacity={isActive ? "0.3" : "0.15"}
             />
@@ -172,7 +192,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
                   y1={200 + r1 * Math.sin(rad)}
                   x2={200 + r2 * Math.cos(rad)}
                   y2={200 + r2 * Math.sin(rad)}
-                  stroke="#00C8FF"
+                  stroke={colors.primary}
                   strokeWidth={isMajor ? "1" : "0.5"}
                   opacity={isActive ? (isMajor ? "0.5" : "0.2") : (isMajor ? "0.3" : "0.12")}
                 />
@@ -183,7 +203,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="175"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth="1"
               opacity={isActive ? "0.15" : "0.08"}
               strokeDasharray="20 40"
@@ -198,7 +218,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="148"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth={isActive ? "1.5" : "1"}
               opacity={isActive ? "0.35" : "0.2"}
               strokeDasharray="8 12 3 12"
@@ -214,7 +234,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
                   y1={200 + 145 * Math.sin(rad)}
                   x2={200 + 151 * Math.cos(rad)}
                   y2={200 + 151 * Math.sin(rad)}
-                  stroke="#00C8FF"
+                  stroke={colors.primary}
                   strokeWidth="0.5"
                   opacity={isActive ? "0.35" : "0.2"}
                 />
@@ -247,7 +267,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="118"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth="0.5"
               opacity={isActive ? "0.3" : "0.15"}
             />
@@ -256,7 +276,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="125"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth="0.75"
               opacity={isActive ? "0.2" : "0.12"}
               strokeDasharray="4 16"
@@ -271,7 +291,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="90"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth={isActive ? "2" : "1.5"}
               opacity={isActive ? "0.4" : "0.25"}
               strokeDasharray="15 25 8 25"
@@ -284,7 +304,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="55"
               fill="none"
-              stroke="#00C8FF"
+              stroke={colors.primary}
               strokeWidth={isActive ? "1" : "0.5"}
               opacity={isActive ? "0.5" : "0.2"}
             >
@@ -306,7 +326,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="42"
               fill="none"
-              stroke="#18BFFF"
+              stroke={colors.secondary}
               strokeWidth="0.8"
               opacity={isActive ? "0.4" : "0.15"}
               strokeDasharray="6 8"
@@ -323,7 +343,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             <circle
               cx="200" cy="200" r="30"
               fill="none"
-              stroke="#5BE7FF"
+              stroke={colors.bright}
               strokeWidth={isActive ? "1.2" : "0.6"}
               opacity={isActive ? "0.5" : "0.2"}
             >
@@ -352,7 +372,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             {/* Bright center point */}
             <circle
               cx="200" cy="200" r="6"
-              fill="#FFFFFF"
+              fill={colors.white}
               opacity={isActive ? "0.9" : "0.5"}
               filter="url(#glow)"
             >
@@ -385,8 +405,8 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             </circle>
           </g>
 
-          {/* ═══ WAVEFORM / AUDIO SEGMENTS (visible when active) ═══ */}
-          {isActive && (
+          {/* ═══ WAVEFORM / AUDIO SEGMENTS (visible when active, not when locked) ═══ */}
+          {isActive && !isLocked && (
             <g style={{
               animation: `rotateSlow ${speeds.inner * 0.8}s linear infinite`,
               transformOrigin: 'center',
@@ -404,7 +424,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
                     y1={200 + innerR * Math.sin(rad)}
                     x2={200 + outerR * Math.cos(rad)}
                     y2={200 + outerR * Math.sin(rad)}
-                    stroke="#5BE7FF"
+                    stroke={colors.bright}
                     strokeWidth="1.5"
                     strokeLinecap="round"
                     opacity="0.4"
@@ -421,8 +441,8 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
             </g>
           )}
 
-          {/* ═══ SCANNING ELEMENTS ═══ */}
-          {status !== "standby" && (
+          {/* ═══ SCANNING ELEMENTS (not when locked) ═══ */}
+          {status !== "standby" && !isLocked && (
             <g style={{
               animation: `rotateFast ${speeds.inner * 0.5}s linear infinite`,
               transformOrigin: 'center',
@@ -431,7 +451,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
               <line
                 x1="200" y1="200"
                 x2="200" y2="60"
-                stroke="#00C8FF"
+                stroke={colors.primary}
                 strokeWidth="1"
                 opacity="0.1"
               />
@@ -439,7 +459,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
               <circle
                 cx="200" cy="80"
                 r="2"
-                fill="#5BE7FF"
+                fill={colors.bright}
                 filter="url(#glow)"
                 opacity="0.6"
               />
@@ -459,7 +479,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
                 cx={200 + p.radius * Math.cos((p.angle * Math.PI) / 180)}
                 cy={200 + p.radius * Math.sin((p.angle * Math.PI) / 180)}
                 r={p.size}
-                fill="#00C8FF"
+                fill={colors.primary}
                 opacity="0.3"
               >
                 <animate
@@ -474,10 +494,10 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
 
           {/* ═══ CROSS HAIRS (subtle) ═══ */}
           <g opacity="0.06">
-            <line x1="200" y1="30" x2="200" y2="80" stroke="#00C8FF" strokeWidth="0.5" />
-            <line x1="200" y1="320" x2="200" y2="370" stroke="#00C8FF" strokeWidth="0.5" />
-            <line x1="30" y1="200" x2="80" y2="200" stroke="#00C8FF" strokeWidth="0.5" />
-            <line x1="320" y1="200" x2="370" y2="200" stroke="#00C8FF" strokeWidth="0.5" />
+            <line x1="200" y1="30" x2="200" y2="80" stroke={colors.primary} strokeWidth="0.5" />
+            <line x1="200" y1="320" x2="200" y2="370" stroke={colors.primary} strokeWidth="0.5" />
+            <line x1="30" y1="200" x2="80" y2="200" stroke={colors.primary} strokeWidth="0.5" />
+            <line x1="320" y1="200" x2="370" y2="200" stroke={colors.primary} strokeWidth="0.5" />
           </g>
 
           {/* ═══ CARDINAL INDICATORS ═══ */}
@@ -490,7 +510,7 @@ const VectorCore = ({ status, onCoreClick, amplitude = 0 }: VectorCoreProps) => 
                 cx={200 + r * Math.cos(rad)}
                 cy={200 + r * Math.sin(rad)}
                 r="2"
-                fill="#00C8FF"
+                fill={colors.primary}
                 opacity={isActive ? "0.45" : "0.25"}
               />
             );

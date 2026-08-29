@@ -1,4 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import type { ChatMessage } from "../types/vector";
 
 interface ConversationPanelProps {
@@ -8,6 +13,51 @@ interface ConversationPanelProps {
   onMinimize: () => void;
   onClose: () => void;
 }
+
+// Custom code component to handle fenced code blocks with a copy button
+const CodeBlock = ({ node, className, children, ...props }: any) => {
+  const match = /language-(\w+)/.exec(className || "");
+  const [copied, setCopied] = useState(false);
+  const codeContent = String(children).replace(/\n$/, "");
+
+  // react-markdown v9 passes `node` which indicates if it's inline or block based on its parent in AST sometimes.
+  // We can also just rely on `match` or multiline content.
+  const isInline = !match && !String(children).includes("\n");
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(codeContent);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (!isInline) {
+    return (
+      <div className="code-block">
+        <div className="code-block__header">
+          <span className="code-block__language">{match ? match[1] : "text"}</span>
+          <button className="code-block__copy" onClick={handleCopy} aria-label="Copy code">
+            {copied ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            )}
+          </button>
+        </div>
+        <pre className="code-block__pre">
+          <code className={className} {...props}>
+            {children}
+          </code>
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <code className={`inline-code ${className || ""}`} {...props}>
+      {children}
+    </code>
+  );
+};
 
 const ConversationPanel = ({
   messages,
@@ -82,7 +132,19 @@ const ConversationPanel = ({
             <span className="conv-msg__sender">
               {msg.role === "user" ? "YOU" : "VECTOR"}
             </span>
-            <div className="conv-msg__content">{msg.content}</div>
+            <div className="conv-msg__content">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
+                components={{
+                  code: CodeBlock,
+                  // Strip default pre wrapper to avoid nested pre tags from our custom code block
+                  pre: ({ children }) => <>{children}</>
+                }}
+              >
+                {msg.content}
+              </ReactMarkdown>
+            </div>
           </div>
         ))}
         <div ref={messagesEndRef} />
