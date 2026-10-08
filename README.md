@@ -1,5 +1,5 @@
 # VECTOR
-**Virtual Engine for Cognitive Thinking, Operations & Reasoning**
+**Virtual Engine for Continuous Tasks, Operations & Reasoning**
 
 VECTOR is a personal AI assistant being developed as a local desktop-oriented application.
 

@@ -1,8 +1,9 @@
+// Load .env before any module that reads configuration at import time
+import "dotenv/config";
 import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
 import crypto from "crypto";
 import Groq, { toFile } from "groq-sdk";
+import type { ChatCompletionCreateParamsStreaming } from "groq-sdk/resources/chat/completions";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import {
   generateRegistrationOptions,
@@ -24,10 +25,50 @@ import {
   updateEvent,
   deleteEvent,
 } from "./calendarService.js";
+import {
+  createConversation,
+  getConversation,
+  getLatestConversation,
+  listConversations,
+  deleteConversation,
+  setConversationTitle,
+  addMessage,
+  getMessages,
+  listMemories,
+  deleteMemory,
+  listWebAuthnCredentials,
+  saveWebAuthnCredential,
+  updateWebAuthnCounter,
+  listPendingActions,
+} from "./db.js";
+import {
+  startSession,
+  endSession,
+  isAuthenticated,
+  requireAuth,
+  requireTrustedOrigin,
+  UI_ORIGIN,
+  lockoutRemaining,
+  recordAuthFailure,
+  recordAuthSuccess,
+} from "./auth.js";
+import {
+  buildMemoryContext,
+  buildConversationHistory,
+  maybeSummarize,
+} from "./memory.js";
+import {
+  GROQ_TOOLS,
+  executeToolCall,
+  resolveAction,
+  classifyConfirmationReply,
+} from "./tools/index.js";
+import { handleEventStream } from "./events.js";
+import { startScheduler } from "./scheduler.js";
+import { searchProvider } from "./tools/webTools.js";
 
-dotenv.config();
 
-const PORT = 3001;
+const PORT = Number(process.env.VECTOR_PORT) || 3001;
 
 const apiKey = process.env.VECTOR_CORE_API_KEY;
 const model = process.env.VECTOR_CORE_MODEL;
@@ -66,34 +107,103 @@ if (elevenLabsApiKey && elevenLabsVoiceId) {
   );
 }
 
+// ═══════════════════════════════════════════════════════════
+//  Fish Audio TTS Configuration
+// ═══════════════════════════════════════════════════════════
+
+const fishAudioApiKey = process.env.FISH_AUDIO_API_KEY;
+const fishAudioVoiceId = process.env.FISH_AUDIO_VOICE_ID;
+
+if (fishAudioApiKey && fishAudioVoiceId) {
+  console.log("[VECTOR_CORE] Fish Audio TTS: Configured");
+} else {
+  console.warn(
+    "[VECTOR_CORE] Fish Audio TTS: Not configured. Set FISH_AUDIO_API_KEY and FISH_AUDIO_VOICE_ID in .env."
+  );
+}
+
 let sessionTokensUsed = 0;
 // Default to 131,072 for gpt-oss-120b, fallback to 100,000 otherwise
 const contextLimit = model === "openai/gpt-oss-120b" ? 131072 : 100000;
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(requireTrustedOrigin);
+
+// Routes reachable while locked. Everything else under /api requires an owner session.
+const PUBLIC_PATHS = new Set([
+  "/api/auth/password",
+  "/api/auth/session",
+  "/api/auth/logout",
+  "/api/auth/webauthn/status",
+  "/api/auth/webauthn/authenticate/options",
+  "/api/auth/webauthn/authenticate/verify",
+  "/api/calendar/oauth/callback", // protected by the OAuth state parameter instead
+]);
+app.use((req, res, next) => {
+  if (PUBLIC_PATHS.has(req.path)) {
+    next();
+    return;
+  }
+  requireAuth(req, res, next);
+});
 
 interface ChatRequestBody {
   message: string;
-  history?: { role: "user" | "assistant"; content: string }[];
+  conversationId?: number;
   isVoice?: boolean;
   clientContext?: any;
 }
 
-// Intent Recognition for Context Injection
-function getRequiredContext(message: string, clientContext: any): string[] {
-  if (!clientContext) return [];
-  const reqLower = message.toLowerCase();
-  const injectedContexts: string[] = [];
+type ChatMessageParam = Groq.Chat.ChatCompletionMessageParam;
 
-  if (reqLower.includes("time") || reqLower.includes("date") || reqLower.includes("day") || reqLower.includes("timezone")) {
-    injectedContexts.push(`[SYSTEM CONTEXT: TIME]
-Current Time: ${clientContext.time?.currentTime}
-Current Date: ${clientContext.time?.currentDate}
-Day of Week: ${clientContext.time?.dayOfWeek}
-Timezone: ${clientContext.time?.timezone}`);
+const MAX_TOOL_ROUNDS = 6;
+
+// Groq's free tier allows few tokens per minute; tool turns make several calls.
+// Short rate-limit waits are absorbed here instead of failing the reply.
+const MAX_RATE_LIMIT_WAIT_S = 20;
+
+async function createCompletionWithRetry(params: ChatCompletionCreateParamsStreaming) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await groq.chat.completions.create(params);
+    } catch (err) {
+      const retryAfter = err instanceof Groq.APIError && err.status === 429
+        ? Number(err.headers?.["retry-after"] ?? 0)
+        : NaN;
+      if (attempt >= 2 || !(retryAfter >= 0) || retryAfter > MAX_RATE_LIMIT_WAIT_S) throw err;
+      console.warn(`[VECTOR_CORE] Groq rate limit hit; retrying in ${retryAfter || 1}s`);
+      await new Promise((r) => setTimeout(r, Math.max(retryAfter, 1) * 1000));
+    }
   }
+}
+
+function writeSSE(res: express.Response, data: Record<string, unknown>): void {
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function makeTitle(message: string): string {
+  const flat = message.replace(/\s+/g, " ").trim();
+  return flat.length > 60 ? `${flat.slice(0, 57)}...` : flat;
+}
+
+// Intent Recognition for Context Injection
+/** Server clock (same PC as Sir), so dates are right even without client context. */
+function serverTimeContext(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const local = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return `[SYSTEM CONTEXT: TIME]
+Now: ${now.toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+Local ISO: ${local}
+Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
+}
+
+function getRequiredContext(message: string, clientContext: any): string[] {
+  // Time is always relevant (memory timestamps, "today", reminders) and costs few tokens.
+  const injectedContexts: string[] = [serverTimeContext()];
+  if (!clientContext) return injectedContexts;
+  const reqLower = message.toLowerCase();
 
   if (reqLower.includes("session") || reqLower.includes("talking") || reqLower.includes("active")) {
     injectedContexts.push(`[SYSTEM CONTEXT: SESSION]
@@ -111,18 +221,16 @@ Humidity: ${clientContext.weather?.humidity}%
 Wind: ${clientContext.weather?.wind} km/h`);
   }
 
-  if (reqLower.includes("calendar") || reqLower.includes("event") || reqLower.includes("schedule") || reqLower.includes("meeting")) {
-    injectedContexts.push(`[SYSTEM CONTEXT: CALENDAR]
-Calendar Connected: ${clientContext.calendar?.connected ? "Yes" : "No"}
-(Note: If connected, upcoming events are available in the calendar system)`);
-  }
-  
+  // Calendar, email, files etc. are reached through tools rather than injected context.
   return injectedContexts;
 }
 
 app.post("/api/chat", async (req: express.Request, res: express.Response) => {
+  let conversationId: number | null = null;
+  let reply = "";
+
   try {
-    const { message, history, isVoice, clientContext } = req.body as ChatRequestBody;
+    const { message, conversationId: requestedId, isVoice, clientContext } = req.body as ChatRequestBody;
 
     // Validate message
     if (!message || typeof message !== "string" || !message.trim()) {
@@ -130,19 +238,34 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
       return;
     }
 
-    // Build conversation messages
-    const messages: Groq.Chat.ChatCompletionMessageParam[] = [
-      { role: "system", content: VECTOR_SYSTEM_PROMPT },
-    ];
+    // Resolve the conversation (history lives server-side now)
+    let conversation = requestedId ? getConversation(Number(requestedId)) : undefined;
+    if (!conversation) conversation = createConversation();
+    conversationId = conversation.id;
 
-    // Append conversation history if provided
-    if (Array.isArray(history)) {
-      for (const msg of history) {
-        if (msg.role && msg.content) {
-          messages.push({ role: msg.role, content: msg.content });
-        }
-      }
+    // A plain "yes"/"no" while an action awaits approval is Sir answering the confirmation
+    const pending = listPendingActions(conversation.id);
+    const decision = pending.length > 0 ? classifyConfirmationReply(message) : null;
+    if (decision) {
+      const action = pending[pending.length - 1];
+      addMessage(conversation.id, "user", message.trim());
+      const outcome = await resolveAction(action.id, decision === "approve");
+      addMessage(conversation.id, "assistant", outcome.message);
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+      writeSSE(res, { conversationId: conversation.id });
+      writeSSE(res, { actionResolved: action.id });
+      writeSSE(res, { text: outcome.message });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
     }
+
+    // Build conversation messages: persona, long-term memory, then this conversation's history
+    const messages: ChatMessageParam[] = [
+      { role: "system", content: VECTOR_SYSTEM_PROMPT },
+      { role: "system", content: buildMemoryContext(conversation.id) },
+      ...buildConversationHistory(conversation),
+    ];
 
     if (isVoice) {
       messages.push({
@@ -153,17 +276,6 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
 
     // Context Injection
     const requiredContexts = getRequiredContext(message, clientContext);
-    
-    // For Calendar, if it's requested and connected, fetch the events
-    if (requiredContexts.some(c => c.includes("SYSTEM CONTEXT: CALENDAR") && c.includes("Yes"))) {
-      try {
-        const events = await listEvents();
-        requiredContexts.push(`[SYSTEM CONTEXT: CALENDAR EVENTS]
-${JSON.stringify(events, null, 2)}`);
-      } catch (e) {
-        requiredContexts.push(`[SYSTEM CONTEXT: CALENDAR EVENTS] Error fetching events.`);
-      }
-    }
 
     if (requiredContexts.length > 0) {
       messages.push({
@@ -172,37 +284,92 @@ ${JSON.stringify(events, null, 2)}`);
       });
     }
 
-    // Append current user message
-    messages.push({ role: "user", content: message.trim() });
-
-    const stream = await groq.chat.completions.create({
-      model: model,
-      messages,
-      temperature: 0.7,
-      max_tokens: 1024,
-      stream: true,
-    });
-
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    });
+    // Append current user message and persist it
+    const trimmed = message.trim();
+    messages.push({ role: "user", content: trimmed });
+    if (conversation.title === "New conversation") {
+      setConversationTitle(conversation.id, makeTitle(trimmed));
+    }
+    addMessage(conversation.id, "user", trimmed);
 
     let contextTokensUsed = 0;
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || "";
-      if (content) {
-        res.write(`data: ${JSON.stringify({ text: content })}\n\n`);
+    // Agent loop: stream the reply; if the model calls tools, run them and continue.
+    // The last round forbids tools so the turn always ends with an answer.
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const finalRound = round === MAX_TOOL_ROUNDS - 1;
+      const stream = await createCompletionWithRetry({
+        model: model,
+        messages,
+        tools: GROQ_TOOLS,
+        tool_choice: finalRound ? "none" : "auto",
+        temperature: 0.7,
+        max_tokens: 1024,
+        stream: true,
+      });
+
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        });
+        res.write(`data: ${JSON.stringify({ conversationId: conversation.id })}\n\n`);
       }
-      
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const usage = (chunk as any).usage || (chunk as any).x_groq?.usage;
-      if (usage) {
-        sessionTokensUsed += usage.total_tokens || 0;
-        contextTokensUsed = usage.prompt_tokens || 0;
+
+      let roundText = "";
+      const toolCalls: { id: string; name: string; args: string }[] = [];
+
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta;
+        const content = delta?.content || "";
+        if (content) {
+          roundText += content;
+          res.write(`data: ${JSON.stringify({ text: content })}\n\n`);
+        }
+
+        for (const call of delta?.tool_calls ?? []) {
+          const slot = (toolCalls[call.index] ??= { id: "", name: "", args: "" });
+          if (call.id) slot.id = call.id;
+          if (call.function?.name) slot.name += call.function.name;
+          if (call.function?.arguments) slot.args += call.function.arguments;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const usage = (chunk as any).usage || (chunk as any).x_groq?.usage;
+        if (usage) {
+          sessionTokensUsed += usage.total_tokens || 0;
+          contextTokensUsed = usage.prompt_tokens || 0;
+        }
       }
+
+      reply += roundText;
+      const calls = toolCalls.filter(Boolean);
+      if (calls.length === 0) break;
+
+      messages.push({
+        role: "assistant",
+        content: roundText || null,
+        tool_calls: calls.map((c) => ({
+          id: c.id,
+          type: "function" as const,
+          function: { name: c.name, arguments: c.args || "{}" },
+        })),
+      });
+
+      for (const call of calls) {
+        console.log(`[VECTOR_CORE] Tool ${call.name}:`, call.args);
+        writeSSE(res, { tool: call.name });
+        const outcome = await executeToolCall(call.name, call.args, { conversationId: conversation.id });
+        if (outcome.confirmation) {
+          writeSSE(res, { confirm: outcome.confirmation });
+        }
+        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(outcome.result) });
+      }
+    }
+
+    if (reply.trim()) {
+      addMessage(conversation.id, "assistant", reply);
     }
 
     if (contextTokensUsed > 0) {
@@ -210,12 +377,26 @@ ${JSON.stringify(events, null, 2)}`);
     }
     res.write("data: [DONE]\n\n");
     res.end();
+
+    // Keep the rolling summary current without delaying the reply
+    const latest = getConversation(conversation.id);
+    if (latest) {
+      maybeSummarize(groq, model, latest).catch((e) =>
+        console.error("[VECTOR_CORE] Summarization failed:", (e as Error).message)
+      );
+    }
   } catch (err: unknown) {
+    // Keep whatever was already said so the memory matches what Sir saw
+    if (conversationId !== null && reply.trim()) {
+      addMessage(conversationId, "assistant", reply);
+    }
+
     if (!res.headersSent) {
       // Handle Groq rate limit
       if (err instanceof Groq.APIError && err.status === 429) {
+        console.warn("[VECTOR_CORE] Groq rate limit:", err.message);
         res.status(429).json({
-          error: "I'm receiving too many requests right now. Please try again in a moment.",
+          error: "I've hit my language model's rate limit, sir. Give me a minute and try again.",
         });
         return;
       }
@@ -244,23 +425,205 @@ ${JSON.stringify(events, null, 2)}`);
 });
 
 // ═══════════════════════════════════════════════════════════
-//  ElevenLabs TTS Route
+//  Conversation & Memory Routes
+// ═══════════════════════════════════════════════════════════
+
+function toClientMessages(conversationId: number) {
+  return getMessages(conversationId).map((m) => ({ role: m.role, content: m.content }));
+}
+
+/** List past conversations, newest first */
+app.get("/api/conversations", (_req: express.Request, res: express.Response) => {
+  res.json({
+    conversations: listConversations().map((c) => ({
+      id: c.id,
+      title: c.title,
+      updatedAt: c.updated_at,
+    })),
+  });
+});
+
+/** Resume the most recent conversation (or nothing, if none exist) */
+app.get("/api/conversations/latest", (_req: express.Request, res: express.Response) => {
+  const latest = getLatestConversation();
+  if (!latest) {
+    res.json({ conversation: null, messages: [] });
+    return;
+  }
+  res.json({
+    conversation: { id: latest.id, title: latest.title },
+    messages: toClientMessages(latest.id),
+  });
+});
+
+app.get("/api/conversations/:id", (req: express.Request, res: express.Response) => {
+  const conversation = getConversation(Number(req.params.id));
+  if (!conversation) {
+    res.status(404).json({ error: "Conversation not found." });
+    return;
+  }
+  res.json({
+    conversation: { id: conversation.id, title: conversation.title },
+    messages: toClientMessages(conversation.id),
+  });
+});
+
+app.delete("/api/conversations/:id", (req: express.Request, res: express.Response) => {
+  deleteConversation(Number(req.params.id));
+  res.json({ success: true });
+});
+
+/** Long-term memories VECTOR holds about Sir */
+app.get("/api/memories", (_req: express.Request, res: express.Response) => {
+  res.json({ memories: listMemories() });
+});
+
+app.delete("/api/memories/:id", (req: express.Request, res: express.Response) => {
+  res.json({ success: deleteMemory(Number(req.params.id)) });
+});
+
+// ═══════════════════════════════════════════════════════════
+//  Action Confirmation & Live Events
+// ═══════════════════════════════════════════════════════════
+
+/** Actions waiting for Sir's approval (e.g. to restore cards after a reload) */
+app.get("/api/actions/pending", (req: express.Request, res: express.Response) => {
+  const conversationId = req.query.conversationId ? Number(req.query.conversationId) : undefined;
+  res.json({
+    actions: listPendingActions(conversationId).map((a) => ({ id: a.id, tool: a.tool, summary: a.summary })),
+  });
+});
+
+/** Approve or deny a pending action from its confirmation card */
+app.post("/api/actions/:id/:decision", async (req: express.Request, res: express.Response) => {
+  const decision = req.params.decision;
+  if (decision !== "approve" && decision !== "deny") {
+    res.status(404).json({ error: "Unknown decision." });
+    return;
+  }
+  const outcome = await resolveAction(String(req.params.id), decision === "approve");
+  if (outcome.conversationId !== null) {
+    addMessage(outcome.conversationId, "assistant", outcome.message);
+  }
+  res.json(outcome);
+});
+
+/** Server → UI push channel (reminders) */
+app.get("/api/events", handleEventStream);
+
+// ═══════════════════════════════════════════════════════════
+//  TTS Routes
 // ═══════════════════════════════════════════════════════════
 
 interface TTSRequestBody {
   text: string;
+  provider?: string;
 }
+
+app.get("/api/tts/status", async (_req: express.Request, res: express.Response) => {
+  let elevenlabsUsage = null;
+  if (elevenlabs) {
+    try {
+      const user = await elevenlabs.user.getSubscription();
+      elevenlabsUsage = {
+        used: user.character_count,
+        limit: user.character_limit,
+        remaining: user.character_limit - user.character_count,
+        unit: "characters"
+      };
+    } catch (e) {
+      console.error("[VECTOR_CORE] ElevenLabs usage fetch error:", (e as Error).message);
+    }
+  }
+
+  let fishAudioUsage = null;
+  if (fishAudioApiKey) {
+    try {
+      const faRes = await fetch("https://api.fish.audio/wallet/self/api-credit", {
+        headers: { "Authorization": `Bearer ${fishAudioApiKey}` }
+      });
+      if (faRes.ok) {
+        const faData = await faRes.json();
+        const credit = parseFloat(faData.credit || "0");
+        const total = parseFloat(faData.cumulative_top_up || "0");
+        fishAudioUsage = {
+          used: total >= credit ? total - credit : 0,
+          limit: total,
+          remaining: credit,
+          unit: "credits"
+        };
+      }
+    } catch (e) {
+      console.error("[VECTOR_CORE] Fish Audio usage fetch error:", (e as Error).message);
+    }
+  }
+
+  res.json({
+    elevenlabs: {
+      configured: !!(elevenLabsApiKey && elevenLabsVoiceId),
+      usage: elevenlabsUsage
+    },
+    fishAudio: {
+      configured: !!(fishAudioApiKey && fishAudioVoiceId),
+      usage: fishAudioUsage
+    }
+  });
+});
 
 app.post("/api/tts", async (req: express.Request, res: express.Response) => {
   try {
-    const { text } = req.body as TTSRequestBody;
+    const { text, provider } = req.body as TTSRequestBody;
 
     if (!text || typeof text !== "string" || !text.trim()) {
       res.status(400).json({ error: "Text is required for speech synthesis." });
       return;
     }
-    console.log("[VECTOR_TTS] TTS request started, text length:", text.length);
+    console.log(`[VECTOR_TTS] TTS request started, text length: ${text.length}, provider: ${provider || "elevenlabs"}`);
 
+    if (provider === "fish-audio") {
+      if (!fishAudioApiKey || !fishAudioVoiceId) {
+        res.status(503).json({ error: "Fish Audio synthesis is not configured." });
+        return;
+      }
+      
+      console.log("[VECTOR_TTS] Fish Audio request sent");
+      const faRes = await fetch("https://api.fish.audio/v1/tts", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${fishAudioApiKey}`,
+          "Content-Type": "application/json",
+          "model": "s2.1-pro-free"
+        },
+        body: JSON.stringify({
+          text: text.trim(),
+          reference_id: fishAudioVoiceId,
+          format: "mp3"
+        })
+      });
+      
+      if (!faRes.ok) {
+        throw new Error(`Fish Audio returned ${faRes.status}: ${await faRes.text()}`);
+      }
+      
+      console.log("[VECTOR_TTS] Fish Audio response received");
+      res.writeHead(200, {
+        "Content-Type": "audio/mpeg",
+        "Cache-Control": "no-cache",
+      });
+      
+      if (faRes.body) {
+        const reader = faRes.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+      }
+      res.end();
+      return;
+    }
+
+    // Default to elevenlabs
     if (!elevenlabs || !elevenLabsVoiceId) {
       res.status(503).json({ error: "Voice synthesis is not configured." });
       return;
@@ -279,7 +642,6 @@ app.post("/api/tts", async (req: express.Request, res: express.Response) => {
       "Cache-Control": "no-cache",
     });
 
-    // Safely iterate the Web ReadableStream
     const reader = audioStream.getReader();
     while (true) {
       const { done, value } = await reader.read();
@@ -288,8 +650,7 @@ app.post("/api/tts", async (req: express.Request, res: express.Response) => {
     }
     res.end();
   } catch (err: any) {
-    // Log the full diagnostic error from the SDK (e.g., authentication_error details)
-    console.error("[VECTOR_CORE] ElevenLabs TTS error:", JSON.stringify(err?.body || err?.message || err, null, 2));
+    console.error("[VECTOR_CORE] TTS error:", err?.message || err);
 
     if (!res.headersSent) {
       res.status(502).json({
@@ -353,10 +714,15 @@ app.get("/api/calendar/status", (_req: express.Request, res: express.Response) =
   }
 });
 
+// The callback is reached via a redirect from Google (no session cookie), so it is
+// tied to the authenticated request that started the flow by a one-time state value.
+let pendingOAuthState: string | null = null;
+
 /** Generate Google OAuth authorization URL */
 app.get("/api/calendar/auth", (_req: express.Request, res: express.Response) => {
   try {
-    const authUrl = getAuthUrl();
+    pendingOAuthState = crypto.randomBytes(16).toString("hex");
+    const authUrl = getAuthUrl(pendingOAuthState);
     if (!authUrl) {
       res.status(500).json({
         error: "Google Calendar credentials not found. Place the OAuth credential JSON in server/credentials/.",
@@ -373,18 +739,21 @@ app.get("/api/calendar/auth", (_req: express.Request, res: express.Response) => 
 app.get("/api/calendar/oauth/callback", async (req: express.Request, res: express.Response) => {
   try {
     const code = req.query.code as string | undefined;
+    const state = req.query.state as string | undefined;
     if (!code) {
       res.status(400).send("Authorization code missing.");
       return;
     }
+    if (!state || !pendingOAuthState || state !== pendingOAuthState) {
+      res.status(400).send("Invalid or expired authorization request. Start the connection again from VECTOR.");
+      return;
+    }
+    pendingOAuthState = null;
 
     await handleOAuthCallback(code);
 
     // Redirect back to the frontend with a success indicator
-    const frontendUrl = req.headers.referer
-      ? new URL(req.headers.referer).origin
-      : "http://localhost:5173";
-    res.redirect(`${frontendUrl}?calendar_connected=true`);
+    res.redirect(`${UI_ORIGIN}/?calendar_connected=true`);
   } catch (err) {
     console.error("[VECTOR_CORE] OAuth callback error:", (err as Error).message);
     res.status(500).send("Failed to complete Google Calendar authorization.");
@@ -480,21 +849,36 @@ app.delete("/api/calendar/events/:eventId", async (req: express.Request, res: ex
 // WebAuthn configuration
 const rpName = "VECTOR";
 const rpID = "localhost";
-const origin = "http://localhost:5173";
+const origin = UI_ORIGIN;
 
-// In-memory WebAuthn credential store (sufficient for dev; replace with DB later)
-interface StoredCredential {
-  credentialID: string;
-  credentialPublicKey: Uint8Array;
-  counter: number;
-  transports?: AuthenticatorTransportFuture[];
-}
-const webauthnCredentials: StoredCredential[] = [];
+// Single owner, single pending ceremony at a time
 let currentChallenge: string | undefined;
+
+function lockedOut(res: express.Response): boolean {
+  const wait = lockoutRemaining();
+  if (wait > 0) {
+    res.status(429).json({ success: false, error: `Too many failed attempts. Try again in ${wait}s.` });
+    return true;
+  }
+  return false;
+}
+
+/** Is the current browser session unlocked? */
+app.get("/api/auth/session", (req: express.Request, res: express.Response) => {
+  res.json({ authenticated: isAuthenticated(req) });
+});
+
+/** Lock: revoke the current session */
+app.post("/api/auth/logout", (req: express.Request, res: express.Response) => {
+  endSession(req, res);
+  res.json({ success: true });
+});
 
 /** Password authentication */
 app.post("/api/auth/password", (req: express.Request, res: express.Response) => {
   try {
+    if (lockedOut(res)) return;
+
     const { password } = req.body as { password?: string };
     const lockPassword = process.env.VECTOR_LOCK_PASSWORD;
 
@@ -508,18 +892,16 @@ app.post("/api/auth/password", (req: express.Request, res: express.Response) => 
       return;
     }
 
-    // Constant-time comparison to prevent timing attacks
-    const a = Buffer.from(password);
-    const b = Buffer.from(lockPassword);
+    // Constant-time comparison to prevent timing attacks (hash first so lengths match)
+    const a = crypto.createHash("sha256").update(password).digest();
+    const b = crypto.createHash("sha256").update(lockPassword).digest();
 
-    let match = false;
-    if (a.length === b.length) {
-      match = crypto.timingSafeEqual(a, b);
-    }
-
-    if (match) {
+    if (crypto.timingSafeEqual(a, b)) {
+      recordAuthSuccess();
+      startSession(res);
       res.json({ success: true });
     } else {
+      recordAuthFailure();
       res.json({ success: false, error: "Authentication failed." });
     }
   } catch {
@@ -529,26 +911,25 @@ app.post("/api/auth/password", (req: express.Request, res: express.Response) => 
 
 /** WebAuthn - Check if credentials are registered */
 app.get("/api/auth/webauthn/status", (_req: express.Request, res: express.Response) => {
-  res.json({ registered: webauthnCredentials.length > 0 });
+  res.json({ registered: listWebAuthnCredentials().length > 0 });
 });
 
-/** WebAuthn - Generate registration options */
+/** WebAuthn - Generate registration options (requires an unlocked session) */
 app.post("/api/auth/webauthn/register/options", async (_req: express.Request, res: express.Response) => {
   try {
     const options = await generateRegistrationOptions({
       rpName,
       rpID,
-      userName: "vector-user",
+      userName: "vector-owner",
       attestationType: "none",
       authenticatorSelection: {
         authenticatorAttachment: "platform",
         userVerification: "required",
         residentKey: "preferred",
       },
-      excludeCredentials: webauthnCredentials.map((cred) => ({
+      excludeCredentials: listWebAuthnCredentials().map((cred) => ({
         id: cred.credentialID,
-        type: "public-key" as const,
-        transports: cred.transports,
+        transports: cred.transports as AuthenticatorTransportFuture[] | undefined,
       })),
     });
 
@@ -560,7 +941,7 @@ app.post("/api/auth/webauthn/register/options", async (_req: express.Request, re
   }
 });
 
-/** WebAuthn - Verify registration response */
+/** WebAuthn - Verify registration response (requires an unlocked session) */
 app.post("/api/auth/webauthn/register/verify", async (req: express.Request, res: express.Response) => {
   try {
     if (!currentChallenge) {
@@ -574,16 +955,16 @@ app.post("/api/auth/webauthn/register/verify", async (req: express.Request, res:
       expectedOrigin: origin,
       expectedRPID: rpID,
     });
+    currentChallenge = undefined;
 
     if (verification.verified && verification.registrationInfo) {
       const { credential } = verification.registrationInfo;
-      webauthnCredentials.push({
+      saveWebAuthnCredential({
         credentialID: credential.id,
         credentialPublicKey: credential.publicKey,
         counter: credential.counter,
         transports: req.body.response?.transports,
       });
-      currentChallenge = undefined;
       res.json({ success: true });
     } else {
       res.json({ success: false, error: "Registration verification failed." });
@@ -599,10 +980,9 @@ app.post("/api/auth/webauthn/authenticate/options", async (_req: express.Request
   try {
     const options = await generateAuthenticationOptions({
       rpID,
-      allowCredentials: webauthnCredentials.map((cred) => ({
+      allowCredentials: listWebAuthnCredentials().map((cred) => ({
         id: cred.credentialID,
-        type: "public-key" as const,
-        transports: cred.transports,
+        transports: cred.transports as AuthenticatorTransportFuture[] | undefined,
       })),
       userVerification: "required",
     });
@@ -618,16 +998,19 @@ app.post("/api/auth/webauthn/authenticate/options", async (_req: express.Request
 /** WebAuthn - Verify authentication response */
 app.post("/api/auth/webauthn/authenticate/verify", async (req: express.Request, res: express.Response) => {
   try {
+    if (lockedOut(res)) return;
+
     if (!currentChallenge) {
       res.status(400).json({ success: false, error: "No challenge found." });
       return;
     }
 
-    const credential = webauthnCredentials.find(
+    const credential = listWebAuthnCredentials().find(
       (cred) => cred.credentialID === req.body.id
     );
 
     if (!credential) {
+      recordAuthFailure();
       res.json({ success: false, error: "Authentication failed." });
       return;
     }
@@ -641,28 +1024,38 @@ app.post("/api/auth/webauthn/authenticate/verify", async (req: express.Request, 
         id: credential.credentialID,
         publicKey: credential.credentialPublicKey,
         counter: credential.counter,
-        transports: credential.transports,
+        transports: credential.transports as AuthenticatorTransportFuture[] | undefined,
       },
     });
+    currentChallenge = undefined;
 
     if (verification.verified) {
-      credential.counter = verification.authenticationInfo.newCounter;
-      currentChallenge = undefined;
+      updateWebAuthnCounter(credential.credentialID, verification.authenticationInfo.newCounter);
+      recordAuthSuccess();
+      startSession(res);
       res.json({ success: true });
     } else {
+      recordAuthFailure();
       res.json({ success: false, error: "Authentication failed." });
     }
   } catch (err) {
     console.error("[VECTOR_CORE] WebAuthn auth verify error:", (err as Error).message);
+    recordAuthFailure();
     res.status(500).json({ success: false, error: "Authentication failed." });
   }
 });
 
-app.listen(PORT, () => {
+// Bind to loopback only: VECTOR is never reachable from the network.
+startScheduler();
+
+app.listen(PORT, "127.0.0.1", () => {
   console.log(`[VECTOR_CORE] Running on port ${PORT}`);
   console.log(`[VECTOR_CORE] Model: ${model}`);
   console.log(`[VECTOR_CORE] ElevenLabs TTS: ${elevenlabs ? "Enabled" : "Disabled"}`);
+  console.log(`[VECTOR_CORE] Fish Audio TTS: ${fishAudioApiKey && fishAudioVoiceId ? "Enabled" : "Disabled"}`);
   const calStatus = getAuthStatus();
   console.log(`[VECTOR_CORE] Google Calendar: ${calStatus.connected ? "Connected" : "Not connected"}${!calStatus.credentialsFound ? " (credentials not found)" : ""}`);
+  console.log(`[VECTOR_CORE] Gmail: ${calStatus.gmailGranted ? "Authorized" : "Not authorized (reconnect Google to grant)"}`);
+  console.log(`[VECTOR_CORE] Web Search: ${searchProvider() ?? "Disabled (set TAVILY_API_KEY)"}`);
   console.log(`[VECTOR_CORE] Lock Screen: ${process.env.VECTOR_LOCK_PASSWORD ? "Enabled" : "Not configured"}`);
 });

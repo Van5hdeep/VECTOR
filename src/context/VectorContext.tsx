@@ -85,6 +85,9 @@ export const VectorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     };
     checkCalendar();
+    // Calendar routes require an unlocked session, so re-check after unlock.
+    window.addEventListener("vector:unlocked", checkCalendar);
+    return () => window.removeEventListener("vector:unlocked", checkCalendar);
   }, []);
 
   // 4. System (Media Devices)

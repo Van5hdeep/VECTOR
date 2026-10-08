@@ -71,20 +71,27 @@ const LockScreen = ({ onUnlock, isUnlocking }: LockScreenProps) => {
     setError("");
 
     if (!webauthnRegistered) {
-      // First time: register
+      // First time: prove ownership with the password, then register this device
+      if (!password.trim()) {
+        setError("Enter your password to set up Windows Hello.");
+        setIsAuthenticating(false);
+        return;
+      }
+      const passwordResult = await verifyPassword(password);
+      setPassword("");
+      if (!passwordResult.success) {
+        setError(passwordResult.error || "Authentication failed.");
+        setIsAuthenticating(false);
+        return;
+      }
       const result = await registerWebAuthn();
       if (result.success) {
         setWebauthnRegistered(true);
-        // After registration, immediately authenticate
-        const authResult = await authenticateWebAuthn();
-        if (authResult.success) {
-          handleSuccess();
-        } else {
-          setError(authResult.error || "Authentication failed.");
-        }
       } else {
-        setError(result.error || "Registration failed.");
+        setError(`${result.error || "Registration failed."} Unlocking with password.`);
       }
+      // Password already authenticated this session
+      handleSuccess();
     } else {
       // Already registered: authenticate
       const result = await authenticateWebAuthn();
@@ -95,7 +102,7 @@ const LockScreen = ({ onUnlock, isUnlocking }: LockScreenProps) => {
       }
     }
     setIsAuthenticating(false);
-  }, [isAuthenticating, webauthnRegistered, handleSuccess]);
+  }, [isAuthenticating, webauthnRegistered, password, handleSuccess]);
 
   // Keyboard handler: Escape to close modal
   useEffect(() => {
@@ -219,8 +226,24 @@ const LockScreen = ({ onUnlock, isUnlocking }: LockScreenProps) => {
               <p className="lock-screen__webauthn-info">
                 {webauthnRegistered
                   ? "Authenticate using Windows Hello."
-                  : "Set up Windows Hello for VECTOR. This will register your device's platform authenticator."}
+                  : "Set up Windows Hello for VECTOR. Confirm your password to register this device."}
               </p>
+              {!webauthnRegistered && (
+                <input
+                  className="lock-screen__input"
+                  type="password"
+                  placeholder="Enter password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleWebAuthn();
+                  }}
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={isAuthenticating}
+                />
+              )}
               <button
                 className="lock-screen__submit"
                 onClick={handleWebAuthn}

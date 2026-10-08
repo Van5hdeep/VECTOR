@@ -31,6 +31,9 @@ server/credentials/
 .env.*
 !.env.example
 
+# VECTOR memory database (conversations, memories, sessions)
+server/data/
+
 # Google OAuth tokens
 server/token.json
 server/token*.json
@@ -41,3 +44,6 @@ server/token*.json
 
 # OS files
 Thumbs.db
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

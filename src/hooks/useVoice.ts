@@ -3,6 +3,7 @@ import { synthesizeSpeech } from "../api/tts";
 
 export interface UseVoiceProps {
   onRecordingComplete?: (audioBlob: Blob) => void;
+  ttsProvider?: string;
 }
 
 export interface UseVoiceReturn {
@@ -262,7 +263,7 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     setIsProcessing(true);
 
     try {
-      const audioBuffer = await synthesizeSpeech(text);
+      const audioBuffer = await synthesizeSpeech(text, propsRef.current?.ttsProvider || "elevenlabs");
 
       const blob = new Blob([audioBuffer], { type: "audio/mpeg" });
       const url = URL.createObjectURL(blob);

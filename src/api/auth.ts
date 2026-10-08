@@ -18,6 +18,15 @@ export async function verifyPassword(
   }
 }
 
+/** Revoke the current session (lock VECTOR). */
+export async function logout(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // Server unreachable: nothing to revoke
+  }
+}
+
 export async function getWebAuthnStatus(): Promise<{ registered: boolean }> {
   try {
     const res = await fetch("/api/auth/webauthn/status");

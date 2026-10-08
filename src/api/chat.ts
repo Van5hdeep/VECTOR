@@ -1,19 +1,33 @@
-import type { ChatMessage, TelemetryData } from "../types/vector";
+import type { TelemetryData } from "../types/vector";
 import type { VectorContextState } from "../types/context";
+import type { PendingAction } from "./actions";
 
+export interface StreamHandlers {
+  onConversation?: (conversationId: number) => void;
+  /** A sensitive tool call is waiting for Sir's approval */
+  onConfirm?: (action: PendingAction) => void;
+  /** A pending action was approved/denied by a typed or spoken yes/no */
+  onActionResolved?: (actionId: string) => void;
+}
+
+/**
+ * Send a message to VECTOR_CORE. Conversation history is stored server-side,
+ * so only the conversation id travels with each request.
+ */
 export async function sendMessage(
   message: string,
-  history: ChatMessage[],
+  conversationId: number | null,
   isVoice: boolean,
   onChunk: (text: string) => void,
   onTelemetry?: (data: TelemetryData) => void,
-  vectorContext?: VectorContextState
+  vectorContext?: VectorContextState,
+  handlers: StreamHandlers = {}
 ): Promise<void> {
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, history, isVoice, clientContext: vectorContext }),
+      body: JSON.stringify({ message, conversationId, isVoice, clientContext: vectorContext }),
     });
 
     if (!res.ok) {
@@ -37,7 +51,7 @@ export async function sendMessage(
         const lines = buffer.split("\n");
         // Keep the last potentially incomplete line in the buffer
         buffer = lines.pop() || "";
-        
+
         for (const line of lines) {
           const trimmed = line.trim();
           if (trimmed.startsWith("data: ")) {
@@ -45,6 +59,15 @@ export async function sendMessage(
             if (dataStr === "[DONE]") continue;
             try {
               const data = JSON.parse(dataStr);
+              if (typeof data.conversationId === "number") {
+                handlers.onConversation?.(data.conversationId);
+              }
+              if (data.confirm) {
+                handlers.onConfirm?.(data.confirm);
+              }
+              if (data.actionResolved) {
+                handlers.onActionResolved?.(data.actionResolved);
+              }
               if (data.text) {
                 onChunk(data.text);
               }

@@ -7,7 +7,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        // The server binds to IPv4 loopback only; avoid localhost resolving to ::1
+        target: `http://127.0.0.1:${process.env.VECTOR_PORT || 3001}`,
         changeOrigin: true,
       },
     },

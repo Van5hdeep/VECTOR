@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import type { ChatMessage } from "../types/vector";
+import type { PendingAction } from "../api/actions";
 
 interface ConversationPanelProps {
   messages: ChatMessage[];
@@ -12,6 +13,9 @@ interface ConversationPanelProps {
   isMinimized: boolean;
   onMinimize: () => void;
   onClose: () => void;
+  onNewConversation: () => void;
+  pendingActions: PendingAction[];
+  onResolveAction: (id: string, approve: boolean) => void;
 }
 
 // Custom code component to handle fenced code blocks with a copy button
@@ -65,6 +69,9 @@ const ConversationPanel = ({
   isMinimized,
   onMinimize,
   onClose,
+  onNewConversation,
+  pendingActions,
+  onResolveAction,
 }: ConversationPanelProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -73,7 +80,7 @@ const ConversationPanel = ({
     if (isOpen && !isMinimized) {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, isOpen, isMinimized]);
+  }, [messages, pendingActions, isOpen, isMinimized]);
 
   if (!isOpen || isMinimized) return null;
 
@@ -83,6 +90,17 @@ const ConversationPanel = ({
       <div className="conv-panel__header">
         <span className="conv-panel__title">VECTOR</span>
         <div className="conv-panel__controls">
+          <button
+            className="conv-panel__btn"
+            onClick={onNewConversation}
+            aria-label="New conversation"
+            title="New conversation"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <line x1="7" y1="2" x2="7" y2="12" stroke="currentColor" strokeWidth="1.5" />
+              <line x1="2" y1="7" x2="12" y2="7" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+          </button>
           <button
             className="conv-panel__btn"
             onClick={onMinimize}
@@ -144,6 +162,20 @@ const ConversationPanel = ({
               >
                 {msg.content}
               </ReactMarkdown>
+            </div>
+          </div>
+        ))}
+        {pendingActions.map((action) => (
+          <div key={action.id} className="action-card" role="group" aria-label="Action awaiting approval">
+            <span className="action-card__label">AWAITING YOUR APPROVAL</span>
+            <div className="action-card__summary">{action.summary}</div>
+            <div className="action-card__buttons">
+              <button className="action-card__btn action-card__btn--approve" onClick={() => onResolveAction(action.id, true)}>
+                PROCEED
+              </button>
+              <button className="action-card__btn" onClick={() => onResolveAction(action.id, false)}>
+                CANCEL
+              </button>
             </div>
           </div>
         ))}

@@ -10,8 +10,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CREDENTIALS_DIR = path.join(__dirname, "credentials");
 const TOKEN_PATH = path.join(CREDENTIALS_DIR, "token.json");
 
-// The OAuth scope required for full calendar access
-const SCOPES = ["https://www.googleapis.com/auth/calendar"];
+// OAuth scopes: full calendar access, plus Gmail read/compose/send/label (no permanent delete)
+export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+const SCOPES = ["https://www.googleapis.com/auth/calendar", GMAIL_SCOPE];
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -121,7 +122,7 @@ function deleteTokens(): void {
 
 // ─── Authenticated Client ────────────────────────────────────
 
-function getAuthenticatedClient() {
+export function getAuthenticatedClient() {
   const client = createOAuth2Client();
   if (!client) return null;
 
@@ -151,19 +152,21 @@ function getAuthenticatedClient() {
 /**
  * Check whether Google Calendar is connected (valid token exists).
  */
-export function getAuthStatus(): { connected: boolean; credentialsFound: boolean } {
+export function getAuthStatus(): { connected: boolean; credentialsFound: boolean; gmailGranted: boolean } {
   const creds = loadCredentials();
   const tokens = loadStoredTokens();
+  const connected = !!(creds && tokens?.refresh_token);
   return {
-    connected: !!(creds && tokens?.refresh_token),
+    connected,
     credentialsFound: !!creds,
+    gmailGranted: connected && String(tokens?.scope ?? "").split(" ").includes(GMAIL_SCOPE),
   };
 }
 
 /**
  * Generate the Google OAuth authorization URL.
  */
-export function getAuthUrl(): string | null {
+export function getAuthUrl(state: string): string | null {
   const client = createOAuth2Client();
   if (!client) return null;
 
@@ -171,6 +174,7 @@ export function getAuthUrl(): string | null {
     access_type: "offline",
     scope: SCOPES,
     prompt: "consent",
+    state,
   });
 }
 
