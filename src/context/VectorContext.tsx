@@ -40,7 +40,26 @@ export const VectorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setSession(prev => ({ ...prev, sessionActiveDuration: duration }));
   }, []);
 
-  // 2. Geolocation & Weather
+  // 2. Geolocation & Weather — kept current: every 10 min, on window focus when stale, and on demand
+  const [weatherUpdatedAt, setWeatherUpdatedAt] = useState<number | null>(null);
+  const coordsRef = React.useRef<{ lat: number; lon: number } | null>(null);
+  const updatedAtRef = React.useRef(0);
+
+  const loadWeather = React.useCallback(async (force: boolean) => {
+    const coords = coordsRef.current;
+    if (!coords) return;
+    const data = await fetchWeather(coords.lat, coords.lon, force);
+    setWeather(data);
+    if (data.isAvailable) {
+      updatedAtRef.current = Date.now();
+      setWeatherUpdatedAt(updatedAtRef.current);
+    }
+  }, []);
+
+  const refreshWeather = React.useCallback(() => {
+    void loadWeather(true);
+  }, [loadWeather]);
+
   useEffect(() => {
     if (!navigator.geolocation) {
       setLocation(prev => ({ ...prev, error: "Geolocation is not supported by your browser" }));
@@ -50,26 +69,40 @@ export const VectorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const handleSuccess = async (pos: GeolocationPosition) => {
       const lat = pos.coords.latitude;
       const lon = pos.coords.longitude;
-      
+      const moved = !coordsRef.current
+        || Math.abs(coordsRef.current.lat - lat) > 0.05
+        || Math.abs(coordsRef.current.lon - lon) > 0.05;
+      if (!moved) return;
+      coordsRef.current = { lat, lon };
+
       setLocation(prev => ({ ...prev, latitude: lat, longitude: lon, error: null }));
-      
       const city = await reverseGeocode(lat, lon);
       setLocation(prev => ({ ...prev, city }));
-
-      const weatherData = await fetchWeather(lat, lon);
-      setWeather(weatherData);
+      await loadWeather(true);
     };
 
     const handleError = (err: GeolocationPositionError) => {
       setLocation(prev => ({ ...prev, error: err.message }));
     };
 
-    navigator.geolocation.getCurrentPosition(handleSuccess, handleError, {
+    const watchId = navigator.geolocation.watchPosition(handleSuccess, handleError, {
       enableHighAccuracy: false,
-      timeout: 10000,
-      maximumAge: 600000 // 10 minutes cache
+      timeout: 15000,
+      maximumAge: 600000,
     });
-  }, []);
+
+    const interval = window.setInterval(() => void loadWeather(true), 10 * 60 * 1000);
+    const onFocus = () => {
+      if (Date.now() - updatedAtRef.current > 5 * 60 * 1000) void loadWeather(true);
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [loadWeather]);
 
   // 3. Calendar Status Check
   useEffect(() => {
@@ -107,9 +140,11 @@ export const VectorProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     session,
     calendar,
     system,
+    weatherUpdatedAt,
+    refreshWeather,
     updateTime,
     updateSessionDuration
-  }), [location, time, weather, session, calendar, system, updateTime, updateSessionDuration]);
+  }), [location, time, weather, session, calendar, system, weatherUpdatedAt, refreshWeather, updateTime, updateSessionDuration]);
 
   return (
     <VectorContext.Provider value={value}>

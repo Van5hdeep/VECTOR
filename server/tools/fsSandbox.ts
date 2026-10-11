@@ -103,7 +103,7 @@ export function resolveSafePath(input: string): string {
   return real;
 }
 
-/** Path shown back to the model/Sir, relative to its root where possible. */
+/** Path shown back to the model/user, relative to its root where possible. */
 export function displayPath(absolute: string): string {
   const root = FILE_ROOTS.find((r) => isInside(r.path, absolute));
   if (!root) return absolute;

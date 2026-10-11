@@ -14,9 +14,11 @@ import { reminderTools } from "./reminderTools.js";
 import { calendarTools } from "./calendarTools.js";
 import { emailTools } from "./emailTools.js";
 import { webTools } from "./webTools.js";
+import { briefingTools } from "./briefingTools.js";
 
 const TOOLS: VectorTool[] = [
   ...memoryTools,
+  ...briefingTools,
   ...systemTools,
   ...fileTools,
   ...reminderTools,
@@ -41,7 +43,7 @@ export interface ConfirmationRequest {
 export interface ToolOutcome {
   /** What the model sees as the tool result */
   result: unknown;
-  /** Set when the call was held back for Sir's approval */
+  /** Set when the call was held back for the user's approval */
   confirmation?: ConfirmationRequest;
 }
 
@@ -53,7 +55,7 @@ function errorMessage(err: unknown): string {
 
 /**
  * Executes a model-requested tool call. Sensitive calls are not executed:
- * they are parked as pending actions that only Sir can approve.
+ * they are parked as pending actions that only the user can approve.
  */
 export async function executeToolCall(name: string, rawArgs: string, ctx: ToolContext): Promise<ToolOutcome> {
   const tool = TOOLS_BY_NAME.get(name);
@@ -75,7 +77,7 @@ export async function executeToolCall(name: string, rawArgs: string, ctx: ToolCo
         result: {
           status: "awaiting_confirmation",
           summary,
-          note: "NOT executed yet. A confirmation card is now shown to Sir. In one short sentence, tell him what you are about to do and ask whether to proceed. Do not claim it is done.",
+          note: "NOT executed yet. A confirmation card is now shown to the user. In one short sentence, tell them what you are about to do and ask whether to proceed. Do not claim it is done.",
         },
         confirmation: { id, tool: name, summary },
       };
@@ -93,25 +95,25 @@ export interface ResolvedAction {
   conversationId: number | null;
 }
 
-/** Runs (approve) or discards (deny) a pending action. Only reachable from Sir's own input. */
+/** Runs (approve) or discards (deny) a pending action. Only reachable from the user's own input. */
 export async function resolveAction(id: string, approve: boolean): Promise<ResolvedAction> {
   const action = getPendingAction(id);
   if (!action || !resolvePendingAction(id, approve ? "approved" : "denied")) {
-    return { ok: false, message: "That request has already been handled or has expired, sir.", conversationId: null };
+    return { ok: false, message: "That request has already been handled or has expired.", conversationId: null };
   }
   if (!approve) {
-    return { ok: true, message: "Understood, sir. I've cancelled that.", conversationId: action.conversation_id };
+    return { ok: true, message: "Understood. I've cancelled that.", conversationId: action.conversation_id };
   }
 
   const tool = TOOLS_BY_NAME.get(action.tool);
-  if (!tool) return { ok: false, message: "That action is no longer available, sir.", conversationId: action.conversation_id };
+  if (!tool) return { ok: false, message: "That action is no longer available.", conversationId: action.conversation_id };
 
   try {
     const result = await tool.run(JSON.parse(action.args), { conversationId: action.conversation_id });
     const detail = result && typeof result === "object" && "message" in result ? ` ${(result as { message: string }).message}` : "";
-    return { ok: true, message: `Done, sir.${detail}`, conversationId: action.conversation_id };
+    return { ok: true, message: `Done.${detail}`, conversationId: action.conversation_id };
   } catch (err) {
-    return { ok: false, message: `I'm afraid that failed, sir: ${errorMessage(err)}`, conversationId: action.conversation_id };
+    return { ok: false, message: `That failed: ${errorMessage(err)}`, conversationId: action.conversation_id };
   }
 }
 

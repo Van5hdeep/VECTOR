@@ -1,6 +1,11 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import './index.css'
+import './styles/tokens.css'
+import './styles/base.css'
+import './styles/lock.css'
+import './styles/console.css'
+import './styles/cards.css'
+import './styles/chat.css'
 import App from './App.tsx'
 
 // Any API call rejected for a missing/expired owner session sends VECTOR back to the lock screen.

@@ -1,0 +1,435 @@
+/* ═══ App shell ═══ */
+
+.app {
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 50%, rgba(20, 36, 70, 0.35), transparent 70%),
+    var(--void);
+}
+
+.particle-field {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 0;
+}
+
+/* ═══ Console layout ═══ */
+
+.console {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr var(--rail-w);
+  grid-template-rows: var(--topbar-h) 1fr auto;
+  grid-template-areas:
+    "top top top"
+    "left center right"
+    "dock dock dock";
+  gap: 0 var(--s6);
+  padding: 0 var(--s6) var(--s5);
+  pointer-events: none; /* let clicks reach the particle star */
+  animation: console-in 700ms var(--ease-out) both;
+}
+
+.console > * {
+  pointer-events: auto;
+}
+
+@keyframes console-in {
+  from { opacity: 0; }
+}
+
+.console--behind {
+  filter: blur(2px) brightness(0.6);
+  transition: filter var(--dur);
+}
+
+/* ═══ Top bar ═══ */
+
+.topbar {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+/* The arc reactor: glows blue while VECTOR responds, red when he doesn't */
+.reactor {
+  display: block;
+  flex: none;
+  color: var(--vector);
+  filter: drop-shadow(0 0 6px var(--vector-glow));
+}
+
+.reactor--alert {
+  color: var(--alert);
+  filter: drop-shadow(0 0 6px rgba(255, 59, 85, 0.6));
+}
+
+.reactor__heart {
+  animation: reactor-pulse 2.8s ease-in-out infinite;
+}
+
+.reactor--alert .reactor__heart {
+  animation-duration: 0.9s;
+}
+
+@keyframes reactor-pulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reactor__heart { animation: none; }
+}
+
+.topbar__word {
+  font-family: var(--font-tech);
+  font-weight: 700;
+  font-size: var(--fs-19);
+  letter-spacing: 0.3em;
+  color: var(--text-hi);
+}
+
+.topbar__status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: var(--s2);
+  padding: 2px var(--s3);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  font-family: var(--font-tech);
+  font-size: var(--fs-13);
+  color: var(--text);
+}
+
+.topbar__status--offline {
+  border-color: rgba(255, 59, 85, 0.5);
+  color: #ff8a9a;
+}
+
+.topbar__status--offline .topbar__pulse {
+  background: var(--alert);
+  box-shadow: 0 0 8px rgba(255, 59, 85, 0.6);
+}
+
+.topbar__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vector);
+  box-shadow: 0 0 8px var(--vector-glow);
+}
+
+.topbar__status--listening .topbar__pulse { background: var(--sir); box-shadow: 0 0 10px var(--sir); }
+.topbar__status--thinking .topbar__pulse { background: var(--circuit); box-shadow: 0 0 10px var(--circuit); }
+.topbar__status--speaking .topbar__pulse { background: var(--vector); animation: pulse-dot 0.8s ease-in-out infinite; }
+
+@keyframes pulse-dot {
+  50% { transform: scale(1.6); }
+}
+
+.topbar__actions {
+  display: flex;
+  gap: var(--s1);
+}
+
+/* ═══ Rails ═══ */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s2) 2px var(--s4);
+  scrollbar-width: none;
+}
+
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.rail--left { grid-area: left; }
+.rail--right { grid-area: right; }
+
+/* ═══ Orb caption ═══ */
+
+.orb-caption {
+  grid-area: center;
+  align-self: end;
+  justify-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  max-width: min(560px, 100%);
+  margin-bottom: var(--s5);
+  text-align: center;
+  pointer-events: none;
+}
+
+.orb-caption__state {
+  font-family: var(--font-tech);
+  font-size: var(--fs-13);
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  transition: color var(--dur-slow);
+}
+
+.orb-caption--listening .orb-caption__state { color: var(--sir); }
+.orb-caption--thinking .orb-caption__state { color: var(--circuit); }
+.orb-caption--speaking .orb-caption__state { color: var(--vector); }
+
+.orb-caption__line {
+  color: var(--text);
+  font-size: var(--fs-15);
+  line-height: 1.5;
+  animation: caption-in var(--dur) var(--ease-out);
+}
+
+@keyframes caption-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+/* ═══ Command dock ═══ */
+
+.console__dock {
+  grid-area: dock;
+  display: flex;
+  justify-content: center;
+}
+
+.dock {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: min(680px, 100%);
+  height: 56px;
+  padding: 0 var(--s2) 0 var(--s5);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--glass);
+  backdrop-filter: blur(18px) saturate(140%);
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+
+.dock:focus-within,
+.dock:hover {
+  border-color: var(--vector);
+  box-shadow: 0 0 0 4px rgba(63, 182, 255, 0.08), 0 0 32px rgba(63, 182, 255, 0.12);
+}
+
+.dock__icon {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.dock__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-hi);
+  font-size: var(--fs-15);
+}
+
+.dock__input::placeholder {
+  color: var(--text-dim);
+}
+
+.dock__kbd,
+kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-dim);
+}
+
+.dock__mic {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+}
+
+/* ═══ Scrims & settings ═══ */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(2, 5, 12, 0.5);
+  animation: fade-in var(--dur) ease;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+
+.settings {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  width: min(380px, 100vw);
+  padding: var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s6);
+  overflow-y: auto;
+  background: var(--glass-strong);
+  border-left: 1px solid var(--line-strong);
+  backdrop-filter: blur(24px);
+  animation: slide-in var(--dur) var(--ease-out);
+}
+
+@keyframes slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+}
+
+.settings__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings__head h2 {
+  font-size: var(--fs-19);
+  color: var(--text-hi);
+}
+
+.settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.settings__options {
+  display: grid;
+  gap: var(--s2);
+}
+
+.settings__option {
+  display: grid;
+  gap: var(--s1);
+  text-align: left;
+  padding: var(--s3) var(--s4);
+  border-radius: var(--r-inner);
+  border: 1px solid var(--line);
+  background: rgba(3, 8, 18, 0.5);
+  transition: border-color var(--dur-fast), background var(--dur-fast);
+}
+
+.settings__option:hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+
+.settings__option--active {
+  border-color: var(--vector);
+  background: var(--vector-soft);
+}
+
+.settings__option-name {
+  font-family: var(--font-tech);
+  font-weight: 600;
+  color: var(--text-hi);
+}
+
+.settings__option-meta,
+.settings__text {
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+
+/* ═══ My voice (voiceprint enrolment) ═══ */
+
+.voiceprint__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.voiceprint__prompts {
+  display: grid;
+  gap: var(--s2);
+  padding: 0;
+  list-style: none;
+}
+
+.voiceprint__prompt {
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid var(--line);
+  transition: color var(--dur-fast), border-color var(--dur-fast);
+}
+
+.voiceprint__prompt--now {
+  color: var(--text-hi);
+  border-left-color: var(--vector);
+}
+
+.voiceprint__prompt--done {
+  opacity: 0.5;
+}
+
+.voiceprint__meter,
+.voiceprint__bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.voiceprint__meter-level,
+.voiceprint__bar-fill {
+  height: 100%;
+  background: var(--vector);
+  transition: width 80ms linear;
+}
+
+.voiceprint__bar-fill {
+  transition: width var(--dur) ease;
+}
+
+/* ═══ Responsive ═══ */
+
+@media (max-width: 1180px) {
+  :root { --rail-w: 280px; }
+}
+
+@media (max-width: 980px) {
+  body { overflow: auto; }
+  .app { position: absolute; min-height: 100%; }
+  .console {
+    position: relative;
+    min-height: 100vh;
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--topbar-h) 46vh auto auto auto;
+    grid-template-areas: "top" "center" "dock" "left" "right";
+    gap: var(--s5);
+    padding: 0 var(--s4) var(--s6);
+  }
+  .rail { overflow: visible; }
+  .orb-caption { margin-bottom: 0; }
+}

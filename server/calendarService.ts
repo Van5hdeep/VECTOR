@@ -147,12 +147,38 @@ export function getAuthenticatedClient() {
   return client;
 }
 
+// ─── Expired-login Tracking ──────────────────────────────────
+// Google returns invalid_grant when the stored refresh token is revoked or
+// expired (7 days for OAuth apps in "Testing"). Remember it so the UI can say so.
+
+let authExpired = false;
+
+function isInvalidGrant(err: unknown): boolean {
+  const e = err as { message?: string; response?: { data?: { error?: string } } };
+  return e?.response?.data?.error === "invalid_grant" || /invalid_grant/i.test(e?.message ?? "");
+}
+
+/** Runs a Google API call, translating an expired login into a clear error. */
+export async function trackGoogleCall<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    const result = await fn();
+    authExpired = false;
+    return result;
+  } catch (err) {
+    if (isInvalidGrant(err)) {
+      authExpired = true;
+      throw new Error("Google login expired. Reconnect Google from the Calendar card.");
+    }
+    throw err;
+  }
+}
+
 // ─── Public API ──────────────────────────────────────────────
 
 /**
  * Check whether Google Calendar is connected (valid token exists).
  */
-export function getAuthStatus(): { connected: boolean; credentialsFound: boolean; gmailGranted: boolean } {
+export function getAuthStatus(): { connected: boolean; credentialsFound: boolean; gmailGranted: boolean; expired: boolean } {
   const creds = loadCredentials();
   const tokens = loadStoredTokens();
   const connected = !!(creds && tokens?.refresh_token);
@@ -160,6 +186,7 @@ export function getAuthStatus(): { connected: boolean; credentialsFound: boolean
     connected,
     credentialsFound: !!creds,
     gmailGranted: connected && String(tokens?.scope ?? "").split(" ").includes(GMAIL_SCOPE),
+    expired: connected && authExpired,
   };
 }
 
@@ -196,6 +223,7 @@ export async function handleOAuthCallback(code: string): Promise<void> {
     }
   }
   saveTokens(tokens as StoredTokens);
+  authExpired = false;
 }
 
 /**
@@ -230,7 +258,7 @@ export async function listEvents(
     params.timeMax = timeMax;
   }
 
-  const response = await calendar.events.list(params);
+  const response = await trackGoogleCall(() => calendar.events.list(params));
   const events = response.data.items || [];
 
   return events.map(mapEvent);
@@ -245,7 +273,7 @@ export async function createEvent(eventData: CalendarEventInput): Promise<Calend
 
   const calendar = google.calendar({ version: "v3", auth });
 
-  const response = await calendar.events.insert({
+  const response = await trackGoogleCall(() => calendar.events.insert({
     calendarId: "primary",
     requestBody: {
       summary: eventData.summary,
@@ -254,7 +282,7 @@ export async function createEvent(eventData: CalendarEventInput): Promise<Calend
       start: eventData.start,
       end: eventData.end,
     },
-  });
+  }));
 
   return mapEvent(response.data);
 }
@@ -271,7 +299,7 @@ export async function updateEvent(
 
   const calendar = google.calendar({ version: "v3", auth });
 
-  const response = await calendar.events.patch({
+  const response = await trackGoogleCall(() => calendar.events.patch({
     calendarId: "primary",
     eventId,
     requestBody: {
@@ -281,7 +309,7 @@ export async function updateEvent(
       start: eventData.start,
       end: eventData.end,
     },
-  });
+  }));
 
   return mapEvent(response.data);
 }
@@ -295,10 +323,10 @@ export async function deleteEvent(eventId: string): Promise<void> {
 
   const calendar = google.calendar({ version: "v3", auth });
 
-  await calendar.events.delete({
+  await trackGoogleCall(() => calendar.events.delete({
     calendarId: "primary",
     eventId,
-  });
+  }));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────

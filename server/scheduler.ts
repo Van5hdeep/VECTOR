@@ -35,8 +35,8 @@ function fireDueReminders(): void {
     const late = now - reminder.due_at > 5 * 60 * 1000;
     const when = new Date(reminder.due_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
     const text = late
-      ? `Sir, a reminder I couldn't deliver at ${when}: ${reminder.message}`
-      : `Sir, a reminder: ${reminder.message}`;
+      ? `A reminder I couldn't deliver at ${when}: ${reminder.message}`
+      : `Reminder: ${reminder.message}`;
 
     showToast("VECTOR", reminder.message);
 
@@ -46,6 +46,7 @@ function fireDueReminders(): void {
     if (conversation) addMessage(conversation.id, "assistant", text);
 
     broadcast({ type: "reminder", id: reminder.id, conversationId: conversation?.id ?? null, text });
+    broadcast({ type: "reminders_changed" });
 
     const next = nextOccurrence(reminder.due_at, reminder.repeat, now);
     if (next) rescheduleReminder(reminder.id, next);

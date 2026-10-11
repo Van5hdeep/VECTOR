@@ -65,9 +65,18 @@ export interface TelemetryData {
   contextLimit: number;
 }
 
+export interface ToolActivity {
+  name: string;
+  detail?: string;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Tools VECTOR used while producing this reply (live turns only) */
+  tools?: ToolActivity[];
+  /** Special rendering: reminders and action outcomes */
+  kind?: "reminder" | "outcome";
 }
 
 export const STATUS_LABELS: Record<VectorStatus, string> = {

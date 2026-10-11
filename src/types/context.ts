@@ -61,6 +61,9 @@ export interface VectorContextState {
   session: SessionContext;
   calendar: CalendarContext;
   system: SystemContext;
+  /** When weather was last fetched (ms), and a manual refresh */
+  weatherUpdatedAt?: number | null;
+  refreshWeather?: () => void;
   updateTime?: (time: TimeContext) => void;
   updateSessionDuration?: (duration: number) => void;
 }

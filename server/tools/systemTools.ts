@@ -89,7 +89,7 @@ function normaliseUrl(target: string): URL | null {
 export const systemTools: VectorTool[] = [
   {
     name: "open",
-    description: "Open something on Sir's Windows PC: an installed app by name (e.g. 'Spotify', 'VS Code', 'Calculator'), a website URL, or a file/folder inside Sir's allowed folders.",
+    description: "Open something on the user's Windows PC: an installed app by name (e.g. 'Spotify', 'VS Code', 'Calculator'), a website URL, or a file/folder inside the user's allowed folders.",
     parameters: {
       type: "object",
       properties: {

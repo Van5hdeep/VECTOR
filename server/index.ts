@@ -2,9 +2,10 @@
 import "dotenv/config";
 import express from "express";
 import crypto from "crypto";
+import fs from "node:fs";
+import path from "node:path";
 import Groq, { toFile } from "groq-sdk";
 import type { ChatCompletionCreateParamsStreaming } from "groq-sdk/resources/chat/completions";
-import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -40,6 +41,9 @@ import {
   saveWebAuthnCredential,
   updateWebAuthnCounter,
   listPendingActions,
+  DATA_DIR,
+  listUpcomingReminders,
+  cancelReminder,
 } from "./db.js";
 import {
   startSession,
@@ -56,6 +60,7 @@ import {
   buildMemoryContext,
   buildConversationHistory,
   maybeSummarize,
+  generateTitle,
 } from "./memory.js";
 import {
   GROQ_TOOLS,
@@ -63,9 +68,22 @@ import {
   resolveAction,
   classifyConfirmationReply,
 } from "./tools/index.js";
-import { handleEventStream } from "./events.js";
+import { handleEventStream, broadcast } from "./events.js";
 import { startScheduler } from "./scheduler.js";
+import { deliverBriefing, groqComposer, startBriefingScheduler } from "./briefing.js";
+import { synthesizeLocal, preloadVoice } from "./voice.js";
+import {
+  clearVoiceprint,
+  enrollVoiceprint,
+  pcmFromInt16,
+  preloadSpeaker,
+  setSensitivity,
+  verifySpeaker,
+  voiceprintStatus,
+  type Sensitivity,
+} from "./speaker.js";
 import { searchProvider } from "./tools/webTools.js";
+import { createGeminiCompletion, geminiConfigured, geminiModel } from "./gemini.js";
 
 
 const PORT = Number(process.env.VECTOR_PORT) || 3001;
@@ -87,40 +105,8 @@ if (!model) {
   process.exit(1);
 }
 
-const groq = new Groq({ apiKey });
-
-// ═══════════════════════════════════════════════════════════
-//  ElevenLabs TTS Configuration (optional — voice is not required)
-// ═══════════════════════════════════════════════════════════
-
-const elevenLabsApiKey = process.env.ELEVENLABS_API_KEY;
-const elevenLabsVoiceId = process.env.ELEVENLABS_VOICE_ID;
-const elevenLabsModel = process.env.ELEVENLABS_MODEL || "eleven_flash_v2_5";
-
-let elevenlabs: ElevenLabsClient | null = null;
-if (elevenLabsApiKey && elevenLabsVoiceId) {
-  elevenlabs = new ElevenLabsClient({ apiKey: elevenLabsApiKey });
-  console.log("[VECTOR_CORE] ElevenLabs TTS: Configured");
-} else {
-  console.warn(
-    "[VECTOR_CORE] ElevenLabs TTS: Not configured. Set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in .env to enable voice."
-  );
-}
-
-// ═══════════════════════════════════════════════════════════
-//  Fish Audio TTS Configuration
-// ═══════════════════════════════════════════════════════════
-
-const fishAudioApiKey = process.env.FISH_AUDIO_API_KEY;
-const fishAudioVoiceId = process.env.FISH_AUDIO_VOICE_ID;
-
-if (fishAudioApiKey && fishAudioVoiceId) {
-  console.log("[VECTOR_CORE] Fish Audio TTS: Configured");
-} else {
-  console.warn(
-    "[VECTOR_CORE] Fish Audio TTS: Not configured. Set FISH_AUDIO_API_KEY and FISH_AUDIO_VOICE_ID in .env."
-  );
-}
+// Retries are handled by createCompletionWithRetry so waits stay short and visible
+const groq = new Groq({ apiKey, maxRetries: 0 });
 
 let sessionTokensUsed = 0;
 // Default to 131,072 for gpt-oss-120b, fallback to 100,000 otherwise
@@ -159,23 +145,72 @@ type ChatMessageParam = Groq.Chat.ChatCompletionMessageParam;
 
 const MAX_TOOL_ROUNDS = 6;
 
+// Cheap model for background chores (titles, summaries). Groq rate limits are
+// per model, so this keeps the main model's per-minute budget for the user.
+const utilityModel = process.env.VECTOR_UTILITY_MODEL || "openai/gpt-oss-20b";
+
+/** Short human-readable hint of what a tool call is doing, for the UI. */
+function toolDetail(rawArgs: string): string | undefined {
+  try {
+    const args = JSON.parse(rawArgs || "{}");
+    const hint = args.query ?? args.target ?? args.url ?? args.path ?? args.title ?? args.message ?? args.fact;
+    const action = typeof args.action === "string" ? args.action : undefined;
+    const text = [action, typeof hint === "string" ? hint : undefined].filter(Boolean).join(": ");
+    return text ? text.slice(0, 80) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Groq's free tier allows few tokens per minute; tool turns make several calls.
 // Short rate-limit waits are absorbed here instead of failing the reply.
-const MAX_RATE_LIMIT_WAIT_S = 20;
+const MAX_RATE_LIMIT_WAIT_S = 30;
+
+function isDailyLimit(err: unknown): boolean {
+  return err instanceof Groq.APIError && err.status === 429 && /tokens per day|TPD|requests per day|RPD/i.test(err.message);
+}
+
+/**
+ * Where a request goes. The main Groq model first; when it is rate limited (daily or per
+ * minute), Gemini (a stronger model than the utility one), and the Groq utility model as the last resort.
+ */
+type Stage = "main" | "gemini" | "utility";
 
 async function createCompletionWithRetry(params: ChatCompletionCreateParamsStreaming) {
-  for (let attempt = 0; ; attempt++) {
+  let stage: Stage = params.model === utilityModel ? "utility" : "main";
+  for (let waits = 0; ; ) {
     try {
-      return await groq.chat.completions.create(params);
+      if (stage === "gemini") return await createGeminiCompletion(params);
+      return await groq.chat.completions.create({ ...params, model: stage === "utility" ? utilityModel : params.model });
     } catch (err) {
+      if (stage === "gemini") {
+        // Any Gemini failure (its own daily cap, an outage, a request it rejects) just moves on
+        console.warn(`[VECTOR_CORE] Gemini (${geminiModel}) failed: ${(err as Error).message?.slice(0, 160)}; falling back to ${utilityModel}`);
+        stage = "utility";
+        continue;
+      }
+      // Main model is out of budget: keep VECTOR available on another model. A daily limit always
+      // moves on; a per-minute limit only does when Gemini can answer right now instead of making
+      // the user wait (Groq's free tier allows ~one tool-using reply a minute).
+      if (stage === "main" && err instanceof Groq.APIError && err.status === 429 && (geminiConfigured || isDailyLimit(err))) {
+        stage = geminiConfigured ? "gemini" : "utility";
+        console.warn(`[VECTOR_CORE] ${isDailyLimit(err) ? "Daily" : "Per-minute"} limit reached on ${params.model}; falling back to ${stage === "gemini" ? geminiModel : utilityModel}`);
+        continue;
+      }
       const retryAfter = err instanceof Groq.APIError && err.status === 429
         ? Number(err.headers?.["retry-after"] ?? 0)
         : NaN;
-      if (attempt >= 2 || !(retryAfter >= 0) || retryAfter > MAX_RATE_LIMIT_WAIT_S) throw err;
+      if (waits >= 2 || !(retryAfter >= 0) || retryAfter > MAX_RATE_LIMIT_WAIT_S) throw err;
+      waits++;
       console.warn(`[VECTOR_CORE] Groq rate limit hit; retrying in ${retryAfter || 1}s`);
       await new Promise((r) => setTimeout(r, Math.max(retryAfter, 1) * 1000));
     }
   }
+}
+
+/** Groq rejects a generation whose tool-call arguments aren't valid JSON (gpt-oss does this occasionally). */
+function isMalformedToolCall(err: unknown): boolean {
+  return err instanceof Groq.APIError && err.status === 400 && /tool call|tool_use_failed|parse tool/i.test(err.message);
 }
 
 function writeSSE(res: express.Response, data: Record<string, unknown>): void {
@@ -188,7 +223,7 @@ function makeTitle(message: string): string {
 }
 
 // Intent Recognition for Context Injection
-/** Server clock (same PC as Sir), so dates are right even without client context. */
+/** Server clock (same PC as the user), so dates are right even without client context. */
 function serverTimeContext(): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -243,7 +278,7 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
     if (!conversation) conversation = createConversation();
     conversationId = conversation.id;
 
-    // A plain "yes"/"no" while an action awaits approval is Sir answering the confirmation
+    // A plain "yes"/"no" while an action awaits approval is the user answering the confirmation
     const pending = listPendingActions(conversation.id);
     const decision = pending.length > 0 ? classifyConfirmationReply(message) : null;
     if (decision) {
@@ -263,7 +298,7 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
     // Build conversation messages: persona, long-term memory, then this conversation's history
     const messages: ChatMessageParam[] = [
       { role: "system", content: VECTOR_SYSTEM_PROMPT },
-      { role: "system", content: buildMemoryContext(conversation.id) },
+      { role: "system", content: buildMemoryContext(conversation.id, message) },
       ...buildConversationHistory(conversation),
     ];
 
@@ -285,6 +320,7 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
     }
 
     // Append current user message and persist it
+    const isFirstExchange = getMessages(conversation.id).length === 0;
     const trimmed = message.trim();
     messages.push({ role: "user", content: trimmed });
     if (conversation.title === "New conversation") {
@@ -294,58 +330,93 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
 
     let contextTokensUsed = 0;
 
+    // The user pressed Stop (or closed the page): stop generating, keep what was said
+    let clientGone = false;
+    res.on("close", () => {
+      if (!res.writableEnded) clientGone = true;
+    });
+
     // Agent loop: stream the reply; if the model calls tools, run them and continue.
     // The last round forbids tools so the turn always ends with an answer.
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const finalRound = round === MAX_TOOL_ROUNDS - 1;
-      const stream = await createCompletionWithRetry({
-        model: model,
-        messages,
-        tools: GROQ_TOOLS,
-        tool_choice: finalRound ? "none" : "auto",
-        temperature: 0.7,
-        max_tokens: 1024,
-        stream: true,
-      });
-
-      if (!res.headersSent) {
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-        });
-        res.write(`data: ${JSON.stringify({ conversationId: conversation.id })}\n\n`);
-      }
-
       let roundText = "";
-      const toolCalls: { id: string; name: string; args: string }[] = [];
+      let toolCalls: { id: string; name: string; args: string }[] = [];
+      let toolsAllowed = !finalRound;
+      let malformedRetries = 0;
+      let endTurn = false;
 
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta;
-        const content = delta?.content || "";
-        if (content) {
-          roundText += content;
-          res.write(`data: ${JSON.stringify({ text: content })}\n\n`);
-        }
+      // One round, retried if the model emits a tool call Groq can't parse
+      for (;;) {
+        try {
+          const stream = await createCompletionWithRetry({
+            model: model,
+            messages,
+            tools: GROQ_TOOLS,
+            tool_choice: toolsAllowed ? "auto" : "none",
+            temperature: 0.7,
+            max_tokens: 1800, // room for long answers (reasoning tokens count too) within the 8K/min budget
+            stream: true,
+          });
 
-        for (const call of delta?.tool_calls ?? []) {
-          const slot = (toolCalls[call.index] ??= { id: "", name: "", args: "" });
-          if (call.id) slot.id = call.id;
-          if (call.function?.name) slot.name += call.function.name;
-          if (call.function?.arguments) slot.args += call.function.arguments;
-        }
+          if (!res.headersSent) {
+            res.writeHead(200, {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              "Connection": "keep-alive",
+            });
+            res.write(`data: ${JSON.stringify({ conversationId: conversation.id })}
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const usage = (chunk as any).usage || (chunk as any).x_groq?.usage;
-        if (usage) {
-          sessionTokensUsed += usage.total_tokens || 0;
-          contextTokensUsed = usage.prompt_tokens || 0;
+`);
+          }
+
+          for await (const chunk of stream) {
+            if (clientGone) {
+              stream.controller.abort();
+              break;
+            }
+            const delta = chunk.choices[0]?.delta;
+            const content = delta?.content || "";
+            if (content) {
+              roundText += content;
+              res.write(`data: ${JSON.stringify({ text: content })}
+
+`);
+            }
+
+            for (const call of delta?.tool_calls ?? []) {
+              const slot = (toolCalls[call.index] ??= { id: "", name: "", args: "" });
+              if (call.id) slot.id = call.id;
+              if (call.function?.name) slot.name += call.function.name;
+              if (call.function?.arguments) slot.args += call.function.arguments;
+            }
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const usage = (chunk as any).usage || (chunk as any).x_groq?.usage;
+            if (usage) {
+              sessionTokensUsed += usage.total_tokens || 0;
+              contextTokensUsed = usage.prompt_tokens || 0;
+            }
+          }
+          break;
+        } catch (err) {
+          if (!isMalformedToolCall(err)) throw err;
+          console.warn("[VECTOR_CORE] Model produced a malformed tool call; recovering.");
+          if (roundText.trim()) {
+            // The user already has an answer on screen: end the turn cleanly instead of erroring
+            endTurn = true;
+            break;
+          }
+          if (malformedRetries >= 2) throw err;
+          malformedRetries += 1;
+          toolCalls = [];
+          if (malformedRetries === 2) toolsAllowed = false; // last resort: answer without tools
         }
       }
 
       reply += roundText;
       const calls = toolCalls.filter(Boolean);
-      if (calls.length === 0) break;
+      if (calls.length === 0 || clientGone || endTurn) break;
 
       messages.push({
         role: "assistant",
@@ -359,7 +430,7 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
 
       for (const call of calls) {
         console.log(`[VECTOR_CORE] Tool ${call.name}:`, call.args);
-        writeSSE(res, { tool: call.name });
+        writeSSE(res, { tool: call.name, detail: toolDetail(call.args) });
         const outcome = await executeToolCall(call.name, call.args, { conversationId: conversation.id });
         if (outcome.confirmation) {
           writeSSE(res, { confirm: outcome.confirmation });
@@ -372,21 +443,28 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
       addMessage(conversation.id, "assistant", reply);
     }
 
-    if (contextTokensUsed > 0) {
-      res.write(`data: ${JSON.stringify({ telemetry: { sessionTokensUsed, contextTokensUsed, contextLimit } })}\n\n`);
+    if (!clientGone) {
+      if (contextTokensUsed > 0) {
+        res.write(`data: ${JSON.stringify({ telemetry: { sessionTokensUsed, contextTokensUsed, contextLimit } })}\n\n`);
+      }
+      res.write("data: [DONE]\n\n");
+      res.end();
     }
-    res.write("data: [DONE]\n\n");
-    res.end();
 
-    // Keep the rolling summary current without delaying the reply
+    // Background chores on the utility model, without delaying the reply
     const latest = getConversation(conversation.id);
     if (latest) {
-      maybeSummarize(groq, model, latest).catch((e) =>
+      maybeSummarize(groq, utilityModel, latest).catch((e) =>
         console.error("[VECTOR_CORE] Summarization failed:", (e as Error).message)
       );
+      if (isFirstExchange && reply.trim()) {
+        generateTitle(groq, utilityModel, latest.id)
+          .then((title) => title && broadcast({ type: "conversation_titled", id: latest.id, title }))
+          .catch((e) => console.error("[VECTOR_CORE] Titling failed:", (e as Error).message));
+      }
     }
   } catch (err: unknown) {
-    // Keep whatever was already said so the memory matches what Sir saw
+    // Keep whatever was already said so the memory matches what the user saw
     if (conversationId !== null && reply.trim()) {
       addMessage(conversationId, "assistant", reply);
     }
@@ -395,8 +473,11 @@ app.post("/api/chat", async (req: express.Request, res: express.Response) => {
       // Handle Groq rate limit
       if (err instanceof Groq.APIError && err.status === 429) {
         console.warn("[VECTOR_CORE] Groq rate limit:", err.message);
+        const wait = /try again in ([dhms.]+)/i.exec(err.message)?.[1]?.replace(/.d+s/, "s");
         res.status(429).json({
-          error: "I've hit my language model's rate limit, sir. Give me a minute and try again.",
+          error: isDailyLimit(err)
+            ? `I've used today's language-model allowance.${wait ? ` It frees up in about ${wait}.` : ""} Upgrading the Groq plan removes this limit.`
+            : "I've hit my language model's per-minute limit. Give me a minute and try again.",
         });
         return;
       }
@@ -468,12 +549,23 @@ app.get("/api/conversations/:id", (req: express.Request, res: express.Response) 
   });
 });
 
+/** Rename a conversation */
+app.patch("/api/conversations/:id", (req: express.Request, res: express.Response) => {
+  const title = String(req.body?.title ?? "").replace(/s+/g, " ").trim().slice(0, 80);
+  if (!title) {
+    res.status(400).json({ error: "Title is required." });
+    return;
+  }
+  setConversationTitle(Number(req.params.id), title);
+  res.json({ success: true, title });
+});
+
 app.delete("/api/conversations/:id", (req: express.Request, res: express.Response) => {
   deleteConversation(Number(req.params.id));
   res.json({ success: true });
 });
 
-/** Long-term memories VECTOR holds about Sir */
+/** Long-term memories VECTOR holds about the user */
 app.get("/api/memories", (_req: express.Request, res: express.Response) => {
   res.json({ memories: listMemories() });
 });
@@ -486,7 +578,7 @@ app.delete("/api/memories/:id", (req: express.Request, res: express.Response) =>
 //  Action Confirmation & Live Events
 // ═══════════════════════════════════════════════════════════
 
-/** Actions waiting for Sir's approval (e.g. to restore cards after a reload) */
+/** Actions waiting for the user's approval (e.g. to restore cards after a reload) */
 app.get("/api/actions/pending", (req: express.Request, res: express.Response) => {
   const conversationId = req.query.conversationId ? Number(req.query.conversationId) : undefined;
   res.json({
@@ -508,157 +600,81 @@ app.post("/api/actions/:id/:decision", async (req: express.Request, res: express
   res.json(outcome);
 });
 
+/** Upcoming reminders */
+app.get("/api/reminders", (_req: express.Request, res: express.Response) => {
+  res.json({
+    reminders: listUpcomingReminders().map((r) => ({ id: r.id, message: r.message, dueAt: r.due_at, repeat: r.repeat })),
+  });
+});
+
+app.delete("/api/reminders/:id", (req: express.Request, res: express.Response) => {
+  const cancelled = cancelReminder(Number(req.params.id));
+  if (cancelled) broadcast({ type: "reminders_changed" });
+  res.json({ success: cancelled });
+});
+
+/** Connection health for the System card */
+app.get("/api/system/status", (_req: express.Request, res: express.Response) => {
+  const google = getAuthStatus();
+  res.json({
+    model,
+    utilityModel,
+    sessionTokensUsed,
+    contextLimit,
+    calendar: google.connected ? (google.expired ? "expired" : "connected") : "disconnected",
+    gmail: !google.connected ? "disconnected" : google.expired ? "expired" : google.gmailGranted ? "connected" : "not_granted",
+    webSearch: searchProvider() ?? "disabled",
+    voice: "VECTOR (local Kokoro, am_michael, deep android)",
+  });
+});
+
 /** Server → UI push channel (reminders) */
 app.get("/api/events", handleEventStream);
 
 // ═══════════════════════════════════════════════════════════
-//  TTS Routes
+//  TTS — VECTOR's own voice (local Kokoro, deep android). Free, no limits.
 // ═══════════════════════════════════════════════════════════
 
 interface TTSRequestBody {
   text: string;
-  provider?: string;
 }
 
-app.get("/api/tts/status", async (_req: express.Request, res: express.Response) => {
-  let elevenlabsUsage = null;
-  if (elevenlabs) {
-    try {
-      const user = await elevenlabs.user.getSubscription();
-      elevenlabsUsage = {
-        used: user.character_count,
-        limit: user.character_limit,
-        remaining: user.character_limit - user.character_count,
-        unit: "characters"
-      };
-    } catch (e) {
-      console.error("[VECTOR_CORE] ElevenLabs usage fetch error:", (e as Error).message);
-    }
-  }
+// Short fixed phrases ("Welcome back.") are cached on disk: instant on repeat.
+const TTS_CACHE_DIR = path.join(DATA_DIR, "tts-cache");
+const TTS_CACHE_MAX_CHARS = 80;
+const VOICE_ID = "kokoro-am_michael-android-v5"; // bump to invalidate cached audio after voice changes
 
-  let fishAudioUsage = null;
-  if (fishAudioApiKey) {
-    try {
-      const faRes = await fetch("https://api.fish.audio/wallet/self/api-credit", {
-        headers: { "Authorization": `Bearer ${fishAudioApiKey}` }
-      });
-      if (faRes.ok) {
-        const faData = await faRes.json();
-        const credit = parseFloat(faData.credit || "0");
-        const total = parseFloat(faData.cumulative_top_up || "0");
-        fishAudioUsage = {
-          used: total >= credit ? total - credit : 0,
-          limit: total,
-          remaining: credit,
-          unit: "credits"
-        };
-      }
-    } catch (e) {
-      console.error("[VECTOR_CORE] Fish Audio usage fetch error:", (e as Error).message);
-    }
-  }
-
-  res.json({
-    elevenlabs: {
-      configured: !!(elevenLabsApiKey && elevenLabsVoiceId),
-      usage: elevenlabsUsage
-    },
-    fishAudio: {
-      configured: !!(fishAudioApiKey && fishAudioVoiceId),
-      usage: fishAudioUsage
-    }
-  });
-});
+function ttsCachePath(text: string): string | null {
+  if (text.length > TTS_CACHE_MAX_CHARS) return null;
+  const key = crypto.createHash("sha256").update(`${VOICE_ID}|${text}`).digest("hex");
+  return path.join(TTS_CACHE_DIR, `${key}.wav`);
+}
 
 app.post("/api/tts", async (req: express.Request, res: express.Response) => {
+  const { text } = req.body as TTSRequestBody;
+  if (!text || typeof text !== "string" || !text.trim()) {
+    res.status(400).json({ error: "Text is required for speech synthesis." });
+    return;
+  }
   try {
-    const { text, provider } = req.body as TTSRequestBody;
-
-    if (!text || typeof text !== "string" || !text.trim()) {
-      res.status(400).json({ error: "Text is required for speech synthesis." });
-      return;
-    }
-    console.log(`[VECTOR_TTS] TTS request started, text length: ${text.length}, provider: ${provider || "elevenlabs"}`);
-
-    if (provider === "fish-audio") {
-      if (!fishAudioApiKey || !fishAudioVoiceId) {
-        res.status(503).json({ error: "Fish Audio synthesis is not configured." });
-        return;
-      }
-      
-      console.log("[VECTOR_TTS] Fish Audio request sent");
-      const faRes = await fetch("https://api.fish.audio/v1/tts", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${fishAudioApiKey}`,
-          "Content-Type": "application/json",
-          "model": "s2.1-pro-free"
-        },
-        body: JSON.stringify({
-          text: text.trim(),
-          reference_id: fishAudioVoiceId,
-          format: "mp3"
-        })
-      });
-      
-      if (!faRes.ok) {
-        throw new Error(`Fish Audio returned ${faRes.status}: ${await faRes.text()}`);
-      }
-      
-      console.log("[VECTOR_TTS] Fish Audio response received");
-      res.writeHead(200, {
-        "Content-Type": "audio/mpeg",
-        "Cache-Control": "no-cache",
-      });
-      
-      if (faRes.body) {
-        const reader = faRes.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-        }
-      }
-      res.end();
-      return;
-    }
-
-    // Default to elevenlabs
-    if (!elevenlabs || !elevenLabsVoiceId) {
-      res.status(503).json({ error: "Voice synthesis is not configured." });
-      return;
-    }
-
-    console.log("[VECTOR_TTS] ElevenLabs request sent");
-    const audioStream = await elevenlabs.textToSpeech.convert(elevenLabsVoiceId, {
-      text: text.trim(),
-      modelId: elevenLabsModel,
-      outputFormat: "mp3_22050_32",
-    });
-    console.log("[VECTOR_TTS] ElevenLabs response received");
-
-    res.writeHead(200, {
-      "Content-Type": "audio/mpeg",
-      "Cache-Control": "no-cache",
-    });
-
-    const reader = audioStream.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      res.write(value);
-    }
-    res.end();
-  } catch (err: any) {
-    console.error("[VECTOR_CORE] TTS error:", err?.message || err);
-
-    if (!res.headersSent) {
-      res.status(502).json({
-        error: "Voice synthesis failed. The text response is still available.",
-      });
+    const cachePath = ttsCachePath(text.trim());
+    let audio: Buffer;
+    if (cachePath && fs.existsSync(cachePath)) {
+      audio = fs.readFileSync(cachePath);
     } else {
-      res.end();
+      const started = Date.now();
+      audio = await synthesizeLocal(text);
+      console.log(`[VECTOR_TTS] ${text.length} chars in ${Date.now() - started} ms`);
+      if (cachePath) {
+        fs.mkdirSync(TTS_CACHE_DIR, { recursive: true });
+        fs.writeFileSync(cachePath, audio);
+      }
     }
+    res.writeHead(200, { "Content-Type": "audio/wav", "Cache-Control": "no-cache" });
+    res.end(audio);
+  } catch (err) {
+    console.error("[VECTOR_TTS] Local voice failed:", (err as Error).message);
+    res.status(502).json({ error: "Voice synthesis failed. The text response is still available." });
   }
 });
 
@@ -697,6 +713,57 @@ app.post("/api/stt", express.raw({ type: "*/*", limit: "25mb" }), async (req: ex
     const message = (err as Error).message || "Unknown STT error";
     console.error("[VECTOR_CORE] Groq STT error:", message);
     res.status(502).json({ error: "Failed to transcribe audio." });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+//  Voiceprint (only the owner's voice interrupts or is heard)
+// ═══════════════════════════════════════════════════════════
+
+// Browser sends raw little-endian Int16 PCM, 16 kHz mono
+const pcmBody = express.raw({ type: "application/octet-stream", limit: "8mb" });
+
+app.get("/api/voice/voiceprint", (_req: express.Request, res: express.Response) => {
+  res.json(voiceprintStatus());
+});
+
+app.post("/api/voice/voiceprint", pcmBody, async (req: express.Request, res: express.Response) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length < 32000) {
+    res.status(400).json({ error: "Voice sample is missing or too short." });
+    return;
+  }
+  try {
+    res.json(await enrollVoiceprint(pcmFromInt16(req.body)));
+  } catch (err) {
+    console.error("[VECTOR_SPEAKER] Enrolment failed:", (err as Error).message);
+    res.status(422).json({ error: (err as Error).message });
+  }
+});
+
+app.delete("/api/voice/voiceprint", (_req: express.Request, res: express.Response) => {
+  res.json(clearVoiceprint());
+});
+
+app.put("/api/voice/voiceprint/sensitivity", (req: express.Request, res: express.Response) => {
+  const value = (req.body as { sensitivity?: string } | undefined)?.sensitivity;
+  if (value !== "relaxed" && value !== "normal" && value !== "strict") {
+    res.status(400).json({ error: "Sensitivity must be relaxed, normal or strict." });
+    return;
+  }
+  res.json(setSensitivity(value as Sensitivity));
+});
+
+app.post("/api/voice/verify", pcmBody, async (req: express.Request, res: express.Response) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    res.status(400).json({ error: "Audio is required." });
+    return;
+  }
+  try {
+    const result = await verifySpeaker(pcmFromInt16(req.body), req.query.bargeIn === "1");
+    res.json(result);
+  } catch (err) {
+    console.error("[VECTOR_SPEAKER] Verification failed:", (err as Error).message);
+    res.status(502).json({ error: "Voice check unavailable." });
   }
 });
 
@@ -771,14 +838,20 @@ app.post("/api/calendar/disconnect", (_req: express.Request, res: express.Respon
 });
 
 /** List upcoming calendar events */
-app.get("/api/calendar/events", async (_req: express.Request, res: express.Response) => {
+app.get("/api/calendar/events", async (req: express.Request, res: express.Response) => {
   try {
-    const events = await listEvents();
+    const from = typeof req.query.from === "string" ? req.query.from : undefined;
+    const to = typeof req.query.to === "string" ? req.query.to : undefined;
+    const events = await listEvents(from || to ? 250 : 50, from, to);
     res.json({ events });
   } catch (err) {
     const message = (err as Error).message;
     if (message.includes("not connected")) {
-      res.status(401).json({ error: "Google Calendar is not connected." });
+      res.status(401).json({ error: "Google Calendar is not connected.", code: "GOOGLE_DISCONNECTED" });
+      return;
+    }
+    if (message.includes("login expired")) {
+      res.status(401).json({ error: message, code: "GOOGLE_RECONNECT" });
       return;
     }
     console.error("[VECTOR_CORE] Calendar list error:", message);
@@ -799,7 +872,11 @@ app.post("/api/calendar/events", async (req: express.Request, res: express.Respo
   } catch (err) {
     const message = (err as Error).message;
     if (message.includes("not connected")) {
-      res.status(401).json({ error: "Google Calendar is not connected." });
+      res.status(401).json({ error: "Google Calendar is not connected.", code: "GOOGLE_DISCONNECTED" });
+      return;
+    }
+    if (message.includes("login expired")) {
+      res.status(401).json({ error: message, code: "GOOGLE_RECONNECT" });
       return;
     }
     console.error("[VECTOR_CORE] Calendar create error:", message);
@@ -817,7 +894,11 @@ app.patch("/api/calendar/events/:eventId", async (req: express.Request, res: exp
   } catch (err) {
     const message = (err as Error).message;
     if (message.includes("not connected")) {
-      res.status(401).json({ error: "Google Calendar is not connected." });
+      res.status(401).json({ error: "Google Calendar is not connected.", code: "GOOGLE_DISCONNECTED" });
+      return;
+    }
+    if (message.includes("login expired")) {
+      res.status(401).json({ error: message, code: "GOOGLE_RECONNECT" });
       return;
     }
     console.error("[VECTOR_CORE] Calendar update error:", message);
@@ -834,7 +915,11 @@ app.delete("/api/calendar/events/:eventId", async (req: express.Request, res: ex
   } catch (err) {
     const message = (err as Error).message;
     if (message.includes("not connected")) {
-      res.status(401).json({ error: "Google Calendar is not connected." });
+      res.status(401).json({ error: "Google Calendar is not connected.", code: "GOOGLE_DISCONNECTED" });
+      return;
+    }
+    if (message.includes("login expired")) {
+      res.status(401).json({ error: message, code: "GOOGLE_RECONNECT" });
       return;
     }
     console.error("[VECTOR_CORE] Calendar delete error:", message);
@@ -1045,14 +1130,27 @@ app.post("/api/auth/webauthn/authenticate/verify", async (req: express.Request, 
   }
 });
 
+/** Builds and delivers today's briefing now (also what the daily schedule runs). */
+app.post("/api/briefing/run", async (_req: express.Request, res: express.Response) => {
+  try {
+    const { conversationId } = await deliverBriefing(groqComposer(groq, utilityModel));
+    res.json({ success: true, conversationId });
+  } catch (err) {
+    console.error("[VECTOR_BRIEFING] Manual run failed:", (err as Error).message);
+    res.status(500).json({ success: false, error: "Could not build the briefing." });
+  }
+});
+
 // Bind to loopback only: VECTOR is never reachable from the network.
 startScheduler();
+startBriefingScheduler(groqComposer(groq, utilityModel));
+preloadVoice();
+preloadSpeaker();
 
 app.listen(PORT, "127.0.0.1", () => {
   console.log(`[VECTOR_CORE] Running on port ${PORT}`);
   console.log(`[VECTOR_CORE] Model: ${model}`);
-  console.log(`[VECTOR_CORE] ElevenLabs TTS: ${elevenlabs ? "Enabled" : "Disabled"}`);
-  console.log(`[VECTOR_CORE] Fish Audio TTS: ${fishAudioApiKey && fishAudioVoiceId ? "Enabled" : "Disabled"}`);
+  console.log("[VECTOR_CORE] Voice: VECTOR local (Kokoro am_michael, deep android)");
   const calStatus = getAuthStatus();
   console.log(`[VECTOR_CORE] Google Calendar: ${calStatus.connected ? "Connected" : "Not connected"}${!calStatus.credentialsFound ? " (credentials not found)" : ""}`);
   console.log(`[VECTOR_CORE] Gmail: ${calStatus.gmailGranted ? "Authorized" : "Not authorized (reconnect Google to grant)"}`);

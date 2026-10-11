@@ -12,7 +12,7 @@ export interface VectorTool {
   parameters: Record<string, unknown>;
   /**
    * Return a one-line human summary if this particular call must be approved
-   * by Sir before it runs (sending, deleting, overwriting); null otherwise.
+   * by the user before it runs (sending, deleting, overwriting); null otherwise.
    */
   needsConfirmation?: (args: ToolArgs) => string | null | Promise<string | null>;
   run: (args: ToolArgs, ctx: ToolContext) => unknown | Promise<unknown>;

@@ -4,10 +4,14 @@ import type { PendingAction } from "./actions";
 
 export interface StreamHandlers {
   onConversation?: (conversationId: number) => void;
-  /** A sensitive tool call is waiting for Sir's approval */
+  /** A sensitive tool call is waiting for the user's approval */
   onConfirm?: (action: PendingAction) => void;
   /** A pending action was approved/denied by a typed or spoken yes/no */
   onActionResolved?: (actionId: string) => void;
+  /** VECTOR started using a tool (e.g. web_search) */
+  onTool?: (name: string, detail?: string) => void;
+  /** Abort to stop generating */
+  signal?: AbortSignal;
 }
 
 /**
@@ -28,6 +32,7 @@ export async function sendMessage(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, conversationId, isVoice, clientContext: vectorContext }),
+      signal: handlers.signal,
     });
 
     if (!res.ok) {
@@ -65,6 +70,9 @@ export async function sendMessage(
               if (data.confirm) {
                 handlers.onConfirm?.(data.confirm);
               }
+              if (data.tool) {
+                handlers.onTool?.(data.tool, data.detail);
+              }
               if (data.actionResolved) {
                 handlers.onActionResolved?.(data.actionResolved);
               }
@@ -81,7 +89,8 @@ export async function sendMessage(
         }
       }
     }
-  } catch {
-    onChunk("Unable to reach VECTOR_CORE. Please ensure the server is running.");
+  } catch (err) {
+    if ((err as Error)?.name === "AbortError") return; // The user pressed Stop
+    onChunk("I can't reach my core right now. Check that the VECTOR server is running.");
   }
 }

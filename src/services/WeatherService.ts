@@ -40,9 +40,9 @@ export async function reverseGeocode(lat: number, lon: number): Promise<string> 
   }
 }
 
-export async function fetchWeather(lat: number, lon: number): Promise<WeatherContext> {
+export async function fetchWeather(lat: number, lon: number, force = false): Promise<WeatherContext> {
   const now = Date.now();
-  if (cachedWeather && (now - lastWeatherFetch < CACHE_DURATION_MS)) {
+  if (!force && cachedWeather && (now - lastWeatherFetch < CACHE_DURATION_MS)) {
     return cachedWeather;
   }
 

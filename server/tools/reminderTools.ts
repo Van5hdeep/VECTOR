@@ -4,6 +4,7 @@ import {
   cancelReminder,
   type ReminderRepeat,
 } from "../db.js";
+import { broadcast } from "../events.js";
 import type { VectorTool } from "./types.js";
 import { ToolError } from "./types.js";
 
@@ -32,12 +33,12 @@ function parseDue(at: unknown, inMinutes: unknown): number {
 export const reminderTools: VectorTool[] = [
   {
     name: "reminders",
-    description: "Manage Sir's reminders. They fire as a Windows notification and a message from you, even if the VECTOR window is closed (while the server runs). For relative times ('in 20 minutes') use in_minutes; otherwise 'at' as local time YYYY-MM-DDTHH:mm, worked out from the current date/time in context.",
+    description: "Manage the user's reminders. They fire as a Windows notification and a message from you, even if the VECTOR window is closed (while the server runs). For relative times ('in 20 minutes') use in_minutes; otherwise 'at' as local time YYYY-MM-DDTHH:mm, worked out from the current date/time in context.",
     parameters: {
       type: "object",
       properties: {
         action: { type: "string", enum: ["create", "list", "cancel"] },
-        message: { type: "string", description: "What to remind Sir about (create)." },
+        message: { type: "string", description: "What to remind the user about (create)." },
         at: { type: "string", description: "Local date-time, e.g. 2026-10-10T18:30 (create)." },
         in_minutes: { type: "number", description: "Minutes from now (create)." },
         repeat: { type: "string", enum: REPEATS, description: "Default none." },
@@ -54,12 +55,16 @@ export const reminderTools: VectorTool[] = [
           if (due < Date.now() - 60_000) throw new ToolError(`That time (${formatLocal(due)}) is in the past.`);
           const repeat: ReminderRepeat = REPEATS.includes(args.repeat) ? args.repeat : "none";
           const reminder = insertReminder(ctx.conversationId, message, due, repeat);
+          broadcast({ type: "reminders_changed" });
           return { created: true, id: reminder.id, due: formatLocal(due), repeat };
         }
         case "list":
           return listUpcomingReminders().map((r) => ({ id: r.id, message: r.message, due: formatLocal(r.due_at), repeat: r.repeat }));
-        case "cancel":
-          return { cancelled: cancelReminder(Number(args.id)) };
+        case "cancel": {
+          const cancelled = cancelReminder(Number(args.id));
+          if (cancelled) broadcast({ type: "reminders_changed" });
+          return { cancelled };
+        }
         default:
           throw new ToolError(`Unknown action: ${args.action}`);
       }

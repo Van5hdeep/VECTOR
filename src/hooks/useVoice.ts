@@ -1,9 +1,14 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { synthesizeSpeech } from "../api/tts";
+import { synthesizeSpeech, audioMime, applySpeechRate } from "../api/tts";
+import { getVoiceprintStatus, verifyVoice } from "../api/voiceprint";
+import { MIC_CONSTRAINTS, encodeWav, tapPcm } from "../lib/micCapture";
+import { SpeechGate, type GateVerifier } from "../lib/speechGate";
 
 export interface UseVoiceProps {
+  /** The owner finished a turn: a WAV of their speech only (background trimmed off). */
   onRecordingComplete?: (audioBlob: Blob) => void;
-  ttsProvider?: string;
+  /** The voiceprint check keeps failing, so VECTOR cannot tell who is talking. */
+  onVoiceCheckTrouble?: () => void;
 }
 
 export interface UseVoiceReturn {
@@ -13,18 +18,40 @@ export interface UseVoiceReturn {
   isSpeaking: boolean;
   /** Whether TTS is being fetched from the server */
   isProcessing: boolean;
-  /** Audio amplitude 0–1, driven by Web Audio API analysis */
-  amplitude: number;
+  /** Audio level 0–1 (mic while listening, playback while speaking). A ref: read it per frame, it never re-renders. */
+  levelRef: React.RefObject<number>;
   /** Whether microphone is active */
   isListening: boolean;
+  /** Whether VECTOR only reacts to the owner's voice (a voiceprint is set up) */
+  speakerLock: boolean;
   /** Toggle voice mode on/off/interrupt */
   toggleVoice: () => void;
-  /** Send text to ElevenLabs TTS and play the result */
+  /** Speak text in VECTOR's voice, sentence by sentence */
   speak: (text: string) => void;
   /** Update processing state */
   setProcessing: (processing: boolean) => void;
   /** Reset voice state */
   resetVoice: () => void;
+  /** Nothing to say after a turn (empty transcript, error): go back to listening */
+  resumeListening: () => void;
+}
+
+/** Speech chunks: a short first sentence for a fast start, then ~2 sentences per chunk. */
+function splitForSpeech(text: string): string[] {
+  const clean = text.replace(/```[\s\S]*?```/g, " I've put the code on screen. ").replace(/\s+/g, " ").trim();
+  const sentences = clean.match(/[^.!?]+[.!?]+["')\]]*|\S[^.!?]*$/g) ?? [clean];
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    const limit = chunks.length === 0 ? 1 : 200; // first chunk: one sentence
+    if (current && (current.length + sentence.length > limit)) {
+      chunks.push(current.trim());
+      current = "";
+    }
+    current += sentence;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
 }
 
 export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
@@ -32,7 +59,8 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
   const [isListening, setIsListeningState] = useState(false);
   const [isSpeaking, setIsSpeakingState] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [amplitude, setAmplitude] = useState(0);
+  const [speakerLock, setSpeakerLock] = useState(false);
+  const levelRef = useRef(0);
 
   // Sync state to refs for animation loop
   const isListeningRef = useRef(false);
@@ -48,7 +76,9 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     setIsSpeakingState(val);
   }, []);
 
+  const voiceActiveRef = useRef(false);
   const setVoiceActive = useCallback((val: boolean) => {
+    voiceActiveRef.current = val;
     setVoiceActiveState(val);
   }, []);
 
@@ -63,15 +93,12 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const rafRef = useRef<number>(0);
   const objectUrlRef = useRef<string>("");
+  // Each speak() call gets a token; cleanupPlayback() bumps it to cancel a sentence queue in flight
+  const speakTokenRef = useRef(0);
 
-  // Recording refs
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  // Microphone: the stream, and the tap that feeds 16 kHz audio to the speech gate
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  
-  // Silence detection refs
-  const lastSpeechTimeRef = useRef<number>(0);
-  const hasSpokenInSessionRef = useRef<boolean>(false);
+  const stopTapRef = useRef<(() => void) | null>(null);
   const propsRef = useRef(props);
 
   useEffect(() => {
@@ -87,6 +114,8 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
   }, []);
 
   const cleanupPlayback = useCallback(() => {
+    speakTokenRef.current += 1;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.removeAttribute("src");
@@ -103,14 +132,9 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     setSpeaking(false);
   }, [setSpeaking]);
 
-  const stopRecording = useCallback(() => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
-    }
-    setListening(false);
-  }, [setListening]);
-
   const destroyStream = useCallback(() => {
+    stopTapRef.current?.();
+    stopTapRef.current = null;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -121,215 +145,192 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     }
   }, []);
 
+  // ─── Speech gate: only the owner's voice starts, ends or interrupts a turn ───
+
+  const [gate] = useState(
+    () =>
+      new SpeechGate(
+        {
+          onOwnerSpeech: () => {
+            // The owner's voice, not the room's: cut VECTOR off if he is talking
+            if (isSpeakingRef.current) {
+              console.log("[VECTOR] Owner interrupted. Cancelling TTS.");
+              callbacksRef.current.cleanupPlayback();
+            }
+            callbacksRef.current.arm();
+          },
+          // The gate switches itself off after a turn; resumeListening()/speak() re-arm it
+          onUtterance: (pcm) => {
+            setIsProcessing(true);
+            setListening(false);
+            propsRef.current?.onRecordingComplete?.(encodeWav(pcm));
+          },
+          onVerifierTrouble: () => {
+            console.warn("[VECTOR] Voice check is not responding; cannot tell whose voice this is.");
+            propsRef.current?.onVoiceCheckTrouble?.();
+          },
+        },
+        null
+      )
+  );
+
+
+  /** Ready to hear the owner: the next confirmed speech opens a turn. */
+  const arm = useCallback(() => {
+    gate.setMode("listening");
+    setListening(true);
+  }, [gate, setListening]);
+
   const cleanupRecording = useCallback(() => {
-    stopRecording();
+    gate.setMode("off");
+    setListening(false);
     destroyStream();
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     }
-    setAmplitude(0);
-  }, [stopRecording, destroyStream]);
+    levelRef.current = 0;
+  }, [gate, setListening, destroyStream]);
 
-  const startRecordingSession = useCallback(() => {
-    if (!streamRef.current) return;
-    
-    // Stop any existing recorder just in case
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        mediaRecorderRef.current.stop();
-    }
-
-    const supportedTypes = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4",
-      "audio/ogg;codecs=opus",
-      "audio/ogg",
-      "video/webm",
-      "video/mp4"
-    ];
-    let selectedMime = "";
-    for (const t of supportedTypes) {
-      if (MediaRecorder.isTypeSupported(t)) {
-        selectedMime = t;
-        break;
-      }
-    }
-
-    const mediaRecorder = new MediaRecorder(streamRef.current, selectedMime ? { mimeType: selectedMime } : undefined);
-    mediaRecorderRef.current = mediaRecorder;
-    chunksRef.current = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        chunksRef.current.push(e.data);
-      }
-    };
-
-    mediaRecorder.onstop = () => {
-      setIsProcessing(true);
-      setListening(false);
-      const mime = mediaRecorder.mimeType || selectedMime || "audio/webm";
-      const blob = new Blob(chunksRef.current, { type: mime });
-      propsRef.current?.onRecordingComplete?.(blob);
-    };
-
-    lastSpeechTimeRef.current = Date.now();
-    hasSpokenInSessionRef.current = false; // Reset spoken flag for the new recording session
-    mediaRecorder.start();
-    setListening(true);
-  }, [setListening]);
-
-  // Keep references to callbacks for the animation loop
-  const callbacksRef = useRef({
-    cleanupPlayback,
-    startRecordingSession,
-    stopRecording,
-    cleanupRecording,
-    setVoiceActive
-  });
+  // Keep references to callbacks for the audio callbacks
+  const callbacksRef = useRef({ cleanupPlayback, arm });
 
   useEffect(() => {
-    callbacksRef.current = { cleanupPlayback, startRecordingSession, stopRecording, cleanupRecording, setVoiceActive };
-  }, [cleanupPlayback, startRecordingSession, stopRecording, cleanupRecording, setVoiceActive]);
+    callbacksRef.current = { cleanupPlayback, arm };
+  }, [cleanupPlayback, arm]);
 
-  // Animation loop: read audio amplitude from the AnalyserNodes and handle silence/interruption
+  const verifier = useCallback<GateVerifier>(async (pcm, bargeIn) => {
+    const result = await verifyVoice(pcm, bargeIn);
+    if (!result) return null;
+    console.debug(`[VECTOR] Voice check ${result.match ? "match" : "no match"}: ${result.score.toFixed(2)} (need ${result.threshold.toFixed(2)})${bargeIn ? " [barge-in]" : ""}`);
+    return { match: result.match, score: result.score };
+  }, []);
+
+  /** Load the voiceprint state: with one, the gate checks every sound; without, it hears everyone. */
+  const refreshVoiceprint = useCallback(async () => {
+    let enrolled = false;
+    try {
+      enrolled = (await getVoiceprintStatus()).enrolled;
+    } catch { /* offline or locked: fall back to hearing everyone */ }
+    setSpeakerLock(enrolled);
+    gate.setVerifier(enrolled ? verifier : null);
+  }, [gate, verifier]);
+
+  useEffect(() => {
+    const onChanged = () => {
+      if (voiceActiveRef.current) void refreshVoiceprint();
+    };
+    window.addEventListener("vector:voiceprint-changed", onChanged);
+    return () => window.removeEventListener("vector:voiceprint-changed", onChanged);
+  }, [refreshVoiceprint]);
+
+  // Animation loop: mic/playback level for the Core
   const updateAmplitude = useCallback(() => {
-    let micRms = 0;
-    if (micAnalyserRef.current) {
-      const data = new Uint8Array(micAnalyserRef.current.fftSize);
-      micAnalyserRef.current.getByteTimeDomainData(data);
+    const rms = (analyser: AnalyserNode | null) => {
+      if (!analyser) return 0;
+      const data = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(data);
       let sum = 0;
       for (let i = 0; i < data.length; i++) {
         const sample = (data[i] - 128) / 128;
         sum += sample * sample;
       }
-      micRms = Math.sqrt(sum / data.length);
-    }
+      return Math.sqrt(sum / data.length);
+    };
 
-    let playbackRms = 0;
-    if (isSpeakingRef.current && playbackAnalyserRef.current) {
-      const data = new Uint8Array(playbackAnalyserRef.current.fftSize);
-      playbackAnalyserRef.current.getByteTimeDomainData(data);
-      let sum = 0;
-      for (let i = 0; i < data.length; i++) {
-        const sample = (data[i] - 128) / 128;
-        sum += sample * sample;
-      }
-      playbackRms = Math.sqrt(sum / data.length);
-    }
-
-    // Visual amplitude for the Core (use playback if speaking, otherwise mic)
-    const activeRms = isSpeakingRef.current ? playbackRms : micRms;
-    const scaled = Math.min(activeRms * 3.5, 1);
-    setAmplitude(scaled);
-
-    const now = Date.now();
-    
-    // Threshold for detecting speech from MIC
-    if (micRms > 0.015) {
-      lastSpeechTimeRef.current = now;
-      hasSpokenInSessionRef.current = true;
-
-      // Interruption detection
-      if (isSpeakingRef.current) {
-        console.log("[VECTOR] Interruption detected. Cancelling TTS.");
-        callbacksRef.current.cleanupPlayback();
-        
-        // Start a new recording if we aren't currently recording
-        if (!isListeningRef.current) {
-            callbacksRef.current.startRecordingSession();
-        }
-      }
-    } else {
-      // Check for silence timeout if we are currently listening
-      if (isListeningRef.current && hasSpokenInSessionRef.current && (now - lastSpeechTimeRef.current > 2000)) {
-        console.log("[VECTOR] 2 seconds of silence detected. Stopping recording.");
-        callbacksRef.current.stopRecording();
-      }
-    }
+    // The Core follows VECTOR's own voice, or the owner's, never the room
+    const active = isSpeakingRef.current
+      ? rms(playbackAnalyserRef.current)
+      : gate.hearingOwner
+        ? rms(micAnalyserRef.current)
+        : 0;
+    levelRef.current = Math.min(active * 3.5, 1);
 
     rafRef.current = requestAnimationFrame(updateAmplitude);
-  }, []);
+  }, [gate]);
 
   const speak = useCallback(async (text: string) => {
     if (!text.trim()) return;
-
-    console.log("[VECTOR_TTS] TTS request started");
-
-    // Stop any currently playing audio
     cleanupPlayback();
-
+    const token = ++speakTokenRef.current;
     setIsProcessing(true);
 
+    // Sentence pipeline: the first sentence plays while the rest are still being generated
+    const parts = splitForSpeech(text);
+    const fetches: Promise<ArrayBuffer>[] = [];
+    let previous: Promise<unknown> = Promise.resolve();
+    for (const part of parts) {
+      const next = previous.then(() => synthesizeSpeech(part));
+      fetches.push(next);
+      previous = next.catch(() => undefined);
+    }
+
     try {
-      const audioBuffer = await synthesizeSpeech(text, propsRef.current?.ttsProvider || "elevenlabs");
-
-      const blob = new Blob([audioBuffer], { type: "audio/mpeg" });
-      const url = URL.createObjectURL(blob);
-      objectUrlRef.current = url;
-
-      if (!audioRef.current) {
-        audioRef.current = new Audio();
-      }
-      const audio = audioRef.current;
-      audio.src = url;
-
       const ctx = getAudioContext();
-      if (ctx.state === "suspended") {
-        await ctx.resume();
-      }
-
+      if (ctx.state === "suspended") await ctx.resume();
       if (!playbackAnalyserRef.current) {
         playbackAnalyserRef.current = ctx.createAnalyser();
         playbackAnalyserRef.current.fftSize = 256;
         playbackAnalyserRef.current.smoothingTimeConstant = 0.7;
       }
-      
-      // Ensure playback analyser is connected to destination for audible output.
       try { playbackAnalyserRef.current.disconnect(); } catch { /* not connected */ }
       playbackAnalyserRef.current.connect(ctx.destination);
-
-      if (!audioSourceRef.current) {
-        audioSourceRef.current = ctx.createMediaElementSource(audio);
-      }
-      
-      try { audioSourceRef.current.disconnect(); } catch {}
+      if (!audioRef.current) audioRef.current = new Audio();
+      const audio = audioRef.current;
+      applySpeechRate(audio);
+      if (!audioSourceRef.current) audioSourceRef.current = ctx.createMediaElementSource(audio);
+      try { audioSourceRef.current.disconnect(); } catch { /* not connected */ }
       audioSourceRef.current.connect(playbackAnalyserRef.current);
-      
-      console.log("[VECTOR_AUDIO] Audio source created and connected");
 
-      audio.onended = () => {
-        console.log("[VECTOR_AUDIO] Playback ended completely.");
-        callbacksRef.current.cleanupPlayback();
-        // Return to listening state instead of shutting down
-        if (!isListeningRef.current) {
-          callbacksRef.current.startRecordingSession();
+      const playOne = (buffer: ArrayBuffer) =>
+        new Promise<void>((resolve, reject) => {
+          if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+          const url = URL.createObjectURL(new Blob([buffer], { type: audioMime(buffer) }));
+          objectUrlRef.current = url;
+          audio.onended = () => resolve();
+          audio.onerror = () => reject(new Error("Audio playback error"));
+          audio.src = url;
+          audio.play().catch(reject);
+        });
+
+      for (let i = 0; i < fetches.length; i++) {
+        const buffer = await fetches[i];
+        if (speakTokenRef.current !== token) return; // interrupted or replaced
+        if (i === 0) {
+          setIsProcessing(false);
+          setListening(false);
+          setSpeaking(true);
+          gate.setMode("speaking"); // only the owner's voice may cut in
         }
-      };
-      
-      audio.onerror = () => {
-        console.error("[VECTOR] Audio playback error");
-        callbacksRef.current.cleanupPlayback();
-        if (!isListeningRef.current) {
-          callbacksRef.current.startRecordingSession();
-        }
-      };
+        await playOne(buffer);
+        if (speakTokenRef.current !== token) return;
+      }
 
-      setIsProcessing(false);
-      setSpeaking(true);
-
-      console.log("[VECTOR_AUDIO] Playback started");
-      await audio.play();
-
+      // Finished speaking: go back to listening
+      callbacksRef.current.cleanupPlayback();
+      callbacksRef.current.arm();
     } catch (err) {
+      if (speakTokenRef.current !== token) return;
       console.error("[VECTOR] TTS error:", (err as Error).message);
       setIsProcessing(false);
       cleanupPlayback();
-      cleanupRecording();
-      setVoiceActive(false);
+      const resume = () => {
+        if (speakTokenRef.current === token) callbacksRef.current.arm();
+      };
+      // Free safety net: the browser's built-in voice, pitched down, if the local voice fails
+      if ("speechSynthesis" in window) {
+        const utterance = new SpeechSynthesisUtterance(parts.join(" "));
+        utterance.pitch = 0.5;
+        utterance.rate = 0.95;
+        utterance.onend = resume;
+        utterance.onerror = resume;
+        gate.setMode("speaking");
+        window.speechSynthesis.speak(utterance);
+      } else {
+        resume();
+      }
     }
-  }, [cleanupPlayback, cleanupRecording, getAudioContext, setSpeaking, setVoiceActive]);
+  }, [cleanupPlayback, getAudioContext, setSpeaking, setListening, gate]);
 
   const toggleVoice = useCallback(async () => {
     if (voiceActive) {
@@ -338,6 +339,7 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
       cleanupRecording();
       setIsProcessing(false);
       setVoiceActive(false);
+      levelRef.current = 0;
       return;
     }
 
@@ -345,14 +347,7 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     cleanupPlayback();
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }, 
-        video: false 
-      });
+      const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
       streamRef.current = stream;
 
       const ctx = getAudioContext();
@@ -369,8 +364,11 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
       micSourceRef.current.connect(micAnalyserRef.current);
       // Mic analyser is NEVER connected to ctx.destination
 
+      await refreshVoiceprint();
+      stopTapRef.current = await tapPcm(ctx, micSourceRef.current, (frame) => gate.push(frame));
+
       setVoiceActive(true);
-      startRecordingSession();
+      arm();
       if (!rafRef.current) {
         rafRef.current = requestAnimationFrame(updateAmplitude);
       }
@@ -379,7 +377,7 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
       cleanupRecording();
       setVoiceActive(false);
     }
-  }, [voiceActive, cleanupPlayback, cleanupRecording, getAudioContext, startRecordingSession, updateAmplitude, setVoiceActive]);
+  }, [voiceActive, cleanupPlayback, cleanupRecording, getAudioContext, arm, gate, refreshVoiceprint, updateAmplitude, setVoiceActive]);
 
   useEffect(() => {
     return () => {
@@ -402,15 +400,22 @@ export function useVoice(props?: UseVoiceProps): UseVoiceReturn {
     setIsProcessing(false);
   }, [cleanupPlayback, cleanupRecording, setVoiceActive]);
 
+  const resumeListening = useCallback(() => {
+    setIsProcessing(false);
+    if (voiceActiveRef.current) arm();
+  }, [arm]);
+
   return {
     voiceActive,
     isListening,
+    speakerLock,
     isSpeaking,
     isProcessing,
-    amplitude,
+    levelRef,
     toggleVoice,
     speak,
     setProcessing,
     resetVoice,
+    resumeListening,
   };
 }

@@ -1,0 +1,85 @@
+/* ═══════════════════════════════════════════════════════════
+   VECTOR — design tokens (see .planning/02-design-system.md)
+   ═══════════════════════════════════════════════════════════ */
+
+:root {
+  /* Palette — six named colours */
+  --void: #050913;
+  --vector: #3fb6ff;
+  --circuit: #ff9a3c;
+  --sir: #3df5a0;
+  --alert: #ff3b55;
+  --ink: #e6f0fa;
+
+  /* Derived surfaces & text */
+  --bg-deep: #08101e;
+  --glass: rgba(11, 19, 34, 0.62);
+  --glass-strong: rgba(8, 14, 26, 0.9);
+  --glass-hover: rgba(15, 26, 45, 0.72);
+  --line: rgba(120, 190, 255, 0.13);
+  --line-strong: rgba(120, 190, 255, 0.3);
+  --text-hi: var(--ink);
+  --text: #b8c9dc;
+  --text-dim: #7d93ac;
+  --vector-soft: rgba(63, 182, 255, 0.14);
+  --vector-glow: rgba(63, 182, 255, 0.45);
+  --circuit-soft: rgba(255, 154, 60, 0.14);
+  --sir-soft: rgba(61, 245, 160, 0.14);
+  --alert-soft: rgba(255, 59, 85, 0.14);
+
+  /* Orb art (reference image 2) */
+  --orb-a: #5b8cff;
+  --orb-b: #c04bff;
+  --orb-c: #ff7a3d;
+
+  /* Type */
+  --font-tech: "Chakra Petch", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", monospace;
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-15: 0.9375rem;
+  --fs-19: 1.1875rem;
+  --fs-24: 1.5rem;
+  --fs-30: 1.875rem;
+  --fs-38: 2.375rem;
+  --fs-60: 3.75rem;
+
+  /* Space (4px grid) */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 48px;
+
+  /* Shape */
+  --r-card: 14px;
+  --r-inner: 10px;
+  --r-panel: 20px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 160ms;
+  --dur: 320ms;
+  --dur-slow: 700ms;
+
+  /* Layout */
+  --topbar-h: 60px;
+  --rail-w: 320px;
+  --dock-h: 64px;
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur: 1ms;
+    --dur-slow: 1ms;
+  }
+}

@@ -11,11 +11,11 @@ export function handleEventStream(req: express.Request, res: express.Response): 
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
   });
-  res.write(": connected\n\n");
+  res.write(`data: ${JSON.stringify({ type: "hello" })}\n\n`);
   clients.add(res);
 
-  // Keep proxies from closing an idle stream
-  const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
+  // Heartbeat as a real event: the client uses it to detect a dead (zombie) stream
+  const heartbeat = setInterval(() => res.write(`data: ${JSON.stringify({ type: "ping" })}\n\n`), 20_000);
   req.on("close", () => {
     clearInterval(heartbeat);
     clients.delete(res);

@@ -132,7 +132,7 @@ function confirmationFor(args: ToolArgs): string | null {
 export const fileTools: VectorTool[] = [
   {
     name: "files",
-    description: `Work with files in Sir's folders: ${describeRoots() || "(none available)"}. Paths may be absolute or start with a folder name, e.g. 'Desktop/todo.txt'. Actions: list, read (text only), search (by file name), write (create/overwrite), append, mkdir, move (also renames), delete (to Recycle Bin).`,
+    description: `Work with files in the user's folders: ${describeRoots() || "(none available)"}. Paths may be absolute or start with a folder name, e.g. 'Desktop/todo.txt'. Actions: list, read (text only), search (by file name), write (create/overwrite), append, mkdir, move (also renames), delete (to Recycle Bin).`,
     parameters: {
       type: "object",
       properties: {
@@ -180,7 +180,7 @@ export const fileTools: VectorTool[] = [
         case "delete": {
           const target = resolveSafePath(args.path);
           requireExisting(target);
-          if (FILE_ROOTS.some((r) => r.path === target)) throw new ToolError("I won't delete one of your root folders, sir.");
+          if (FILE_ROOTS.some((r) => r.path === target)) throw new ToolError("I won't delete one of your root folders.");
           await recycle(target);
           return { message: `${path.basename(target)} is in the Recycle Bin.` };
         }

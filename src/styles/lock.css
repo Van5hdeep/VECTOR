@@ -1,0 +1,325 @@
+/* ═══ Lock screen ═══ */
+
+.lock {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  /* Pitch black: only VECTOR and the content are visible until the lights come on */
+  background-color: #000;
+}
+
+.lock__bar {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--topbar-h);
+  padding: 0 var(--s6);
+}
+
+.lock__wordmark {
+  text-shadow: 0 0 12px #000, 0 0 24px #000;
+  font-family: var(--font-tech);
+  font-weight: 700;
+  font-size: var(--fs-19);
+  letter-spacing: 0.32em;
+  color: var(--text-hi);
+}
+
+.lock__status {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-family: var(--font-tech);
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+
+/* Half of VECTOR's face enters from the left edge; content fills the rest */
+.lock {
+  --portrait-h: 128vh;
+  --portrait-visible: calc(var(--portrait-h) * 572 / 1024 / 2);
+}
+
+.lock__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s4);
+  padding: 0 var(--s6) var(--s7) calc(var(--portrait-visible) + var(--s6));
+}
+
+/* ═══ Portrait ═══ */
+
+.lock .lock__face {
+  position: fixed;
+  left: 0;
+  top: 50%;
+  height: var(--portrait-h);
+  aspect-ratio: 572 / 1024;
+  /* Centre line on the screen edge: only the right half of the face shows */
+  translate: -50% -44%;
+  pointer-events: none;
+}
+
+.portrait {
+  position: relative;
+  /* Transparent cut-out: the lower body and the image's far edge fade into the dark */
+  mask-image:
+    linear-gradient(to bottom, #000 52%, transparent 82%),
+    linear-gradient(to left, transparent 0%, #000 9%);
+  mask-composite: intersect;
+  -webkit-mask-composite: source-in;
+}
+
+.portrait__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+}
+
+.portrait__img--red {
+  animation: portrait-breathe 3.2s ease-in-out infinite;
+}
+
+.portrait__img--blue {
+  opacity: 0;
+  transition: opacity 700ms var(--ease-in-out);
+}
+
+.portrait--online .portrait__img--blue {
+  opacity: 1;
+}
+
+/* Locked: the red glow breathes */
+@keyframes portrait-breathe {
+  0%, 100% { filter: brightness(0.85) saturate(1.05) drop-shadow(0 0 18px rgba(255, 40, 60, 0.15)); }
+  50% { filter: brightness(1) saturate(1.2) drop-shadow(0 0 28px rgba(255, 40, 60, 0.3)); }
+}
+
+.portrait__img--blue {
+  filter: drop-shadow(0 0 28px rgba(63, 182, 255, 0.28));
+}
+
+/* Red scan sweeping down while locked */
+.portrait__scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 14%;
+  background: linear-gradient(to bottom, transparent, rgba(255, 40, 60, 0.22) 50%, transparent);
+  mix-blend-mode: screen;
+  animation: portrait-scan 4.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes portrait-scan {
+  from { transform: translateY(-20%); }
+  to { transform: translateY(720%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .portrait__img--red,
+  .portrait__scan {
+    animation: none;
+  }
+}
+
+.lock__content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s4);
+}
+
+.lock__title {
+  font-family: var(--font-tech);
+  font-weight: 700;
+  font-size: var(--fs-30);
+  letter-spacing: 0.24em;
+  color: var(--text-hi);
+  text-align: center;
+}
+
+.lock__subtitle {
+  color: var(--text-dim);
+  font-size: var(--fs-15);
+  margin-top: calc(var(--s3) * -1);
+}
+
+.lock__auth-btn {
+  margin-top: var(--s3);
+  height: 44px;
+  padding: 0 var(--s6);
+}
+
+/* Failed attempt */
+.lock--denied .lock__face {
+  animation: lock-shake 320ms var(--ease-in-out);
+}
+
+@keyframes lock-shake {
+  0%, 100% { transform: none; }
+  25% { transform: translateX(-10px); }
+  75% { transform: translateX(10px); }
+}
+
+/* ═══ Auth panel ═══ */
+
+.auth {
+  width: min(380px, calc(100vw - 32px));
+  padding: var(--s5);
+  border-radius: var(--r-card);
+  border: 1px solid var(--line-strong);
+  background: var(--glass-strong);
+  backdrop-filter: blur(18px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  animation: auth-in var(--dur) var(--ease-out);
+}
+
+@keyframes auth-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+
+.auth__tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s1);
+  padding: var(--s1);
+  border-radius: var(--r-inner);
+  background: rgba(3, 8, 18, 0.6);
+}
+
+.auth__tab {
+  height: 32px;
+  border-radius: 8px;
+  font-family: var(--font-tech);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+}
+
+.auth__tab--active {
+  background: var(--vector-soft);
+  color: var(--text-hi);
+}
+
+.auth__hint {
+  font-size: var(--fs-13);
+  color: var(--text-dim);
+}
+
+.auth__row {
+  display: flex;
+  gap: var(--s2);
+}
+
+.auth__row .btn {
+  flex: none;
+}
+
+/* ═══ Welcome sequence ═══ */
+
+.lock--welcome .lock__title,
+.lock--welcome .lock__subtitle,
+.lock--welcome .lock__status,
+.lock--welcome .auth,
+.lock--welcome .lock__auth-btn {
+  opacity: 0;
+  transition: opacity 300ms;
+}
+
+.welcome {
+  position: absolute;
+  left: var(--portrait-visible);
+  right: 0;
+  top: 50%;
+  translate: 0 -50%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.welcome__line {
+  font-family: var(--font-tech);
+  font-weight: 700;
+  font-size: var(--fs-38);
+  letter-spacing: 0.28em;
+  color: var(--text-hi);
+  text-shadow: 0 0 24px var(--vector-glow);
+  animation: welcome-in 700ms var(--ease-out) 650ms both;
+}
+
+.welcome__sub {
+  margin-top: var(--s2);
+  color: var(--vector);
+  font-family: var(--font-tech);
+  font-size: var(--fs-15);
+  letter-spacing: 0.12em;
+  animation: welcome-in 700ms var(--ease-out) 950ms both;
+}
+
+@keyframes welcome-in {
+  from { opacity: 0; letter-spacing: 0.6em; filter: blur(6px); }
+}
+
+/* ═══ Lights on: the room lights up into the console ═══ */
+
+.lock {
+  transition: background-color 900ms var(--ease-in-out);
+}
+
+.lock--lights {
+  background-color: transparent;
+}
+
+.lock__light {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle at calc(var(--portrait-visible) * 0.55) 38%, rgba(200, 235, 255, 0.95) 0%, rgba(63, 182, 255, 0.55) 18%, rgba(63, 182, 255, 0.12) 42%, transparent 70%);
+  transform: scale(0.2);
+}
+
+.lock--lights .lock__light {
+  animation: lights-on 1000ms var(--ease-out) forwards;
+}
+
+@keyframes lights-on {
+  0% { opacity: 0; transform: scale(0.2); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: scale(2.6); }
+}
+
+.lock--lights .lock__face {
+  animation: portrait-out 900ms var(--ease-in-out) forwards;
+}
+
+.lock--lights .welcome,
+.lock--lights .lock__bar {
+  animation: fade-out 500ms ease forwards;
+}
+
+@keyframes portrait-out {
+  40% { filter: brightness(1.6); }
+  to { opacity: 0; transform: scale(1.06); filter: brightness(2.2); }
+}
+
+@keyframes fade-out {
+  to { opacity: 0; }
+}

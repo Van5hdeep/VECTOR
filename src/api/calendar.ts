@@ -30,14 +30,26 @@ export async function disconnectCalendar(): Promise<void> {
   if (!res.ok) throw new Error("Failed to disconnect Google Calendar.");
 }
 
+/** Error carrying the server's reason code (GOOGLE_RECONNECT, GOOGLE_DISCONNECTED). */
+export class CalendarError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 /**
- * Fetch upcoming calendar events.
+ * Fetch calendar events, optionally within a date range (defaults to upcoming).
  */
-export async function getCalendarEvents(): Promise<GoogleCalendarEvent[]> {
-  const res = await fetch("/api/calendar/events");
+export async function getCalendarEvents(from?: Date, to?: Date): Promise<GoogleCalendarEvent[]> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from.toISOString());
+  if (to) params.set("to", to.toISOString());
+  const res = await fetch(`/api/calendar/events${params.size ? `?${params}` : ""}`);
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || "Failed to fetch calendar events.");
+    throw new CalendarError(data.error || "Failed to fetch calendar events.", data.code);
   }
   const data = await res.json();
   return data.events;

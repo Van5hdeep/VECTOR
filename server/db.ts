@@ -11,6 +11,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.VECTOR_DATA_DIR || path.join(__dirname, "data");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+export { DATA_DIR };
+
 export const db = new DatabaseSync(path.join(DATA_DIR, "vector.db"));
 
 db.exec(`
@@ -66,7 +68,7 @@ db.exec(`
     updated_at INTEGER NOT NULL
   );
 
-  -- Sensitive tool calls wait here until Sir approves or denies them
+  -- Sensitive tool calls wait here until the user approves or denies them
   CREATE TABLE IF NOT EXISTS pending_actions (
     id TEXT PRIMARY KEY,
     conversation_id INTEGER,
@@ -87,6 +89,18 @@ db.exec(`
     created_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
+
+  -- Small server-side flags (e.g. the date the morning briefing last ran)
+  CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
+
+// One-time migration: memories were once written as "Sir prefers…"; VECTOR no longer uses titles
+db.exec(`
+  UPDATE memories SET content = 'The user''s ' || substr(content, 7) WHERE content LIKE 'Sir''s %';
+  UPDATE memories SET content = 'The user ' || substr(content, 5) WHERE content LIKE 'Sir %';
 `);
 
 // ─── Types ───────────────────────────────────────────────────
@@ -313,6 +327,14 @@ export function insertReminder(conversationId: number | null, message: string, d
   const result = db.prepare("INSERT INTO reminders (conversation_id, message, due_at, repeat, created_at) VALUES (?, ?, ?, ?, ?)")
     .run(conversationId, message, dueAt, repeat, now);
   return { id: Number(result.lastInsertRowid), conversation_id: conversationId, message, due_at: dueAt, repeat, status: "pending", created_at: now };
+}
+
+export function getKv(key: string): string | undefined {
+  return (db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+}
+
+export function setKv(key: string, value: string): void {
+  db.prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
 export function listUpcomingReminders(): ReminderRow[] {

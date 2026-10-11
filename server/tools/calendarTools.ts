@@ -14,7 +14,7 @@ const TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function requireConnected(): void {
   if (!getAuthStatus().connected) {
-    throw new ToolError("Google Calendar is not connected. Sir can connect it from the Calendar panel.");
+    throw new ToolError("Google Calendar is not connected. The user can connect it from the Calendar panel.");
   }
 }
 
@@ -46,7 +46,7 @@ function confirmationFor(args: ToolArgs): string | null {
 export const calendarTools: VectorTool[] = [
   {
     name: "calendar",
-    description: `Sir's Google Calendar. Times are local (${TIME_ZONE}) as YYYY-MM-DDTHH:mm; for all-day events use YYYY-MM-DD with all_day true. List before update/delete to get the event id.`,
+    description: `The user's Google Calendar. Times are local (${TIME_ZONE}) as YYYY-MM-DDTHH:mm; for all-day events use YYYY-MM-DD with all_day true. List before update/delete to get the event id.`,
     parameters: {
       type: "object",
       properties: {
